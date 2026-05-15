@@ -1872,6 +1872,7 @@
     const $ = (id) => document.getElementById(id);
 
     const SCHEMA_VERSION = 5;
+    const MIN_SUPPORTED_SCHEMA_VERSION = 4;
 
     const presets = {
       dvd: {
@@ -2082,17 +2083,27 @@
       return mediaCategories.find((item) => item.value === value)?.label || value || '';
     }
 
-    function populateCategorySelects() {
-      const options = mediaCategories
-        .map((item) => `<option value="${escapeHtml(item.value)}">${escapeHtml(item.label)}</option>`)
+    function categoryOptions(emptyLabel = 'Any category') {
+      return mediaCategories
+        .map((item, index) => `<option value="${escapeHtml(item.value)}">${escapeHtml(index === 0 ? emptyLabel : item.label)}</option>`)
         .join('');
+    }
+
+    function populateCategorySelects() {
+      const options = categoryOptions('Any category');
       document.querySelectorAll('.categorySelect').forEach((select) => {
         select.innerHTML = options;
       });
+      const designerMetaSelect = $('designerCategoryField');
+      if (designerMetaSelect) designerMetaSelect.innerHTML = categoryOptions('Uncategorized');
       const metaSelect = $('categoryField');
       if (metaSelect) {
         const current = metaSelect.value || state.meta?.category || '';
         metaSelect.value = mediaCategories.some((item) => item.value === current) ? current : '';
+      }
+      if (designerMetaSelect) {
+        const current = designerMetaSelect.value || state.meta?.category || '';
+        designerMetaSelect.value = mediaCategories.some((item) => item.value === current) ? current : '';
       }
     }
 
@@ -4072,8 +4083,7 @@
       for (const e of events) {
         let payload = null;
         try { payload = JSON.parse(e.content || '{}'); } catch { continue; }
-        // Only show posts from the current share schema onwards (unless fetching own designs)
-        if (!skipVersionFilter && (payload.version ?? 0) < SCHEMA_VERSION) continue;
+        if (!skipVersionFilter && (payload.version ?? 0) < MIN_SUPPORTED_SCHEMA_VERSION) continue;
         const title = payload.meta?.title || payload.title || '';
         const imdb = payload.meta?.imdbId || '';
         const category = payload.meta?.category || payload.category || '';
@@ -4399,7 +4409,6 @@
       const category = $('nostrCategory').value;
       const out = $('nostrResults');
       out.innerHTML = '<div class="hint">Searching…</div>';
-      invalidateFeedCache();
       await fetchFeedAndReactions();
       let rows = buildRowsFromEvents(_feedCache.events || [], type, q, false, category);
       if (q) rows = deduplicateRows(rows);
@@ -4442,6 +4451,7 @@
 
     function importDiscDesignFromPayload(payload, targetKey) {
       const key = targetKey || state.activeDiscDesign || 'a';
+      persistDesignerLayers(state.activeDiscDesign || 'a');
       if (payload?.templateMode === 'disc-design' && payload.discDesign) {
         const { key: _k, ...design } = payload.discDesign;
         const importedLayers = Array.isArray(payload.layers)
@@ -4478,15 +4488,20 @@
 
     function openDiscDesignNostrSearch() {
       const target = askDiscDesignSlot();
+      persistDesignerLayers(state.activeDiscDesign || 'a');
       state.activeDiscDesign = target;
+      loadDesignerLayers(target);
       const importTarget = $('importDiscTarget');
       if (importTarget) importTarget.value = target;
       const designerTarget = $('designerImportTarget');
       if (designerTarget) designerTarget.value = target;
       $('nostrType').value = 'disc-design';
-      $('nostrQuery').value = state.meta.title || state.discDesigns[target]?.name || '';
+      $('nostrQuery').value = '';
+      $('nostrCategory').value = state.meta.category || '';
       $('nostrModal').classList.add('open');
       switchModalTab('Search');
+      syncDesignerInputs();
+      render();
       runNostrSearch();
     }
 
@@ -4703,11 +4718,21 @@
       });
 
       $('saveProjectBtn').addEventListener('click', downloadProject);
-      $('designerSaveProjectBtn').addEventListener('click', downloadSingleDesign);
+      $('designerSaveProjectBtn').addEventListener('click', () => {
+        try {
+          downloadSingleDesign();
+        } catch (error) {
+          alert(error.message || 'Could not save this disc design.');
+        }
+      });
       $('designerLoadProjectBtn').addEventListener('click', openDiscDesignNostrSearch);
       $('designerLoadFileBtn').addEventListener('click', () => {
         const target = askDiscDesignSlot();
+        persistDesignerLayers(state.activeDiscDesign || 'a');
         state.activeDiscDesign = target;
+        loadDesignerLayers(target);
+        syncDesignerInputs();
+        render();
         $('discProjectFile').click();
       });
       $('discProjectFile').addEventListener('change', (event) => {
@@ -4754,6 +4779,8 @@
 
       $('designerClearBtn').addEventListener('click', () => {
         state.discDesigns[state.activeDiscDesign].src = '';
+        state.discDesigns[state.activeDiscDesign].layers = [];
+        state.layers = state.layers.filter(l => l.target !== 'designer-disc');
         $('designerUrl').value = '';
         render();
       });
@@ -5037,6 +5064,9 @@
         });
         normalizeDiscState();
         normalizeJewelState();
+        if ((parsed.appMode || parsed.ui?.appMode) === 'designer') {
+          loadDesignerLayers(parsed.activeDiscDesign || parsed.ui?.activeDiscDesign || state.activeDiscDesign || 'a');
+        }
       } catch (error) {
         console.warn('Autosave restore failed', error);
       }
