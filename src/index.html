@@ -1513,9 +1513,8 @@
           <div class="buttonRow">
             <button type="button" id="communityPublishBtn">Publish to Nostr</button>
             <button type="button" id="nostrExportBtn">Copy Nostr event</button>
-            <button type="button" id="nostrImportBtn">Import from Nostr</button>
           </div>
-          <p class="hint">Publishing requires a Nostr browser extension (Alby, nos2x). Import restores a template from a pasted Nostr event.</p>
+          <p class="hint">Publishing requires a Nostr browser extension (Alby, nos2x).</p>
         </details>
       </fieldset>
 
@@ -4948,11 +4947,6 @@
           _feedState[`category${tab}`] = select.value;
           if (tab === 'Mine') loadMyDesigns(); else loadFeedTab(tab);
         });
-      });
-
-      $("nostrImportBtn").addEventListener("click", ()=>{
-        const raw = prompt("Paste Nostr event JSON"); if (!raw) return;
-        try { const evt = JSON.parse(raw); if (evt.content) loadProjectFromText(evt.content); } catch { alert("Bad event JSON"); }
       });
 
       $('relayList').addEventListener('change', async (event) => {
