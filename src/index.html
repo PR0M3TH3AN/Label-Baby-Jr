@@ -4677,7 +4677,7 @@
     }
 
     function attachEvents() {
-      for (const mode of ['cover', 'disc', 'jewel']) {
+      for (const mode of ['cover', 'disc']) {
         $(`mode-${mode}`).addEventListener('click', () => {
           state.templateMode = mode;
           if (mode === 'jewel') {
