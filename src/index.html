@@ -1400,6 +1400,12 @@
         <input id="projectFile" type="file" accept="application/json,.json" hidden />
       </div>
 
+      <div class="quickActions designer-only" aria-label="Designer actions">
+        <button type="button" id="designerBrowseCommunityBtn">Browse Templates</button>
+        <button type="button" id="designerLoadFileBtn">Load from file</button>
+        <input id="discProjectFile" type="file" accept="application/json,.json" hidden />
+      </div>
+
       <fieldset class="workflowStep template-only" id="layoutFieldset">
         <legend data-step="1">Layout</legend>
         <div class="layoutTabs" role="tablist" aria-label="Template layout">
@@ -1813,8 +1819,6 @@
         <legend data-step="4">Save &amp; Export</legend>
         <div class="buttonRow">
           <button type="button" id="designerSaveProjectBtn">Save design (JSON)</button>
-          <button type="button" id="designerLoadFileBtn">Load from file</button>
-          <input id="discProjectFile" type="file" accept="application/json,.json" hidden />
         </div>
         <details>
           <summary>Nostr</summary>
@@ -5095,6 +5099,7 @@
 
 
       $('browseCommunityBtn').addEventListener('click', () => { $('nostrModal').classList.add('open'); switchModalTab('New'); });
+      $('designerBrowseCommunityBtn').addEventListener('click', () => { $('nostrModal').classList.add('open'); switchModalTab('New'); });
       $('welcomeSearchBtn').addEventListener('click', runWelcomeSearch);
       $('welcomeSkipBtn').addEventListener('click', dismissWelcomeModal);
       $('loadProjectBtn').addEventListener('click', () => $('projectFile').click());
