@@ -1521,6 +1521,7 @@
         </div>
         <div class="buttonRow">
           <button id="saveProjectBtn">Save project (JSON)</button>
+          <button id="closeProjectBtn">Close project</button>
         </div>
         <details>
           <summary>Nostr</summary>
@@ -1811,6 +1812,7 @@
         <legend data-step="4">Save &amp; Export</legend>
         <div class="buttonRow">
           <button type="button" id="designerSaveProjectBtn">Save design (JSON)</button>
+          <button type="button" id="designerCloseProjectBtn">Close project</button>
         </div>
         <details>
           <summary>Nostr</summary>
@@ -4147,6 +4149,60 @@
       triggerDownload(payload, filename);
     }
 
+    function closeDiscDesignerProject() {
+      const hasContent = state.discDesign?.src || (state.layers && state.layers.some(l => l.target === 'designer-disc'));
+      if (!hasContent) {
+        state.discDesign = { name: '', src: '', fit: 'cover', zoom: 1, x: 0, y: 0, rotate: 0 };
+        state.layers = state.layers.filter(l => l.target !== 'designer-disc');
+        state.meta = { title: "", imdbId: "", omdbApiKey: "", category: "" };
+        render();
+        return;
+      }
+      const action = confirm('Save this design before closing?\n\nOK = Save to file\nCancel = Close without saving');
+      if (action) {
+        try {
+          downloadSingleDesign();
+        } catch (e) {
+          const publishAnyway = confirm(`Could not save: ${e.message}\n\nPublish to Nostr instead?`);
+          if (publishAnyway) {
+            try {
+              publishDiscDesignToNostr();
+            } catch (e2) {
+              alert(`Error: ${e2.message}`);
+              return;
+            }
+          } else {
+            return;
+          }
+        }
+      }
+      state.discDesign = { name: '', src: '', fit: 'cover', zoom: 1, x: 0, y: 0, rotate: 0 };
+      state.layers = state.layers.filter(l => l.target !== 'designer-disc');
+      state.meta = { title: "", imdbId: "", omdbApiKey: "", category: "" };
+      render();
+    }
+
+    function closeTemplateProject() {
+      const hasContent = state.discs.top?.src || state.discs.bottom?.src || state.combined?.src || Object.values(state.slots || {}).some(s => s?.src);
+      if (!hasContent) {
+        state.discs = { top: { src: '', fit: 'cover', zoom: 1, x: 0, y: 0, rotate: 0 }, bottom: { src: '', fit: 'cover', zoom: 1, x: 0, y: 0, rotate: 0 } };
+        state.slots = { back: { src: '', fit: 'cover', zoom: 1, x: 0, y: 0, rotate: 0 }, spine: { src: '', fit: 'cover', zoom: 1, x: 0, y: 0, rotate: 0 }, front: { src: '', fit: 'cover', zoom: 1, x: 0, y: 0, rotate: 0 } };
+        state.combined = { src: '' };
+        state.meta = { title: "", imdbId: "", omdbApiKey: "", category: "" };
+        render();
+        return;
+      }
+      const action = confirm('Save this project before closing?\n\nOK = Save to file\nCancel = Close without saving');
+      if (action) {
+        downloadProject();
+      }
+      state.discs = { top: { src: '', fit: 'cover', zoom: 1, x: 0, y: 0, rotate: 0 }, bottom: { src: '', fit: 'cover', zoom: 1, x: 0, y: 0, rotate: 0 } };
+      state.slots = { back: { src: '', fit: 'cover', zoom: 1, x: 0, y: 0, rotate: 0 }, spine: { src: '', fit: 'cover', zoom: 1, x: 0, y: 0, rotate: 0 }, front: { src: '', fit: 'cover', zoom: 1, x: 0, y: 0, rotate: 0 } };
+      state.combined = { src: '' };
+      state.meta = { title: "", imdbId: "", omdbApiKey: "", category: "" };
+      render();
+    }
+
     function loadProjectFromText(text) {
       const parsed = JSON.parse(text);
       if (parsed.version && parsed.templateMode === 'disc-design' && parsed.discDesign) {
@@ -5013,6 +5069,7 @@
         window.print();
       });
       $('saveProjectBtn').addEventListener('click', downloadProject);
+      $('closeProjectBtn').addEventListener('click', closeTemplateProject);
       $('designerSaveProjectBtn').addEventListener('click', () => {
         try {
           downloadSingleDesign();
@@ -5021,6 +5078,7 @@
         }
       });
       $('designerLoadProjectBtn').addEventListener('click', openDiscDesignNostrSearch);
+      $('designerCloseProjectBtn').addEventListener('click', closeDiscDesignerProject);
       $('designerLoadFileBtn').addEventListener('click', () => {
         persistCurrentDiscDesign();
         loadCurrentDiscDesignLayers();
