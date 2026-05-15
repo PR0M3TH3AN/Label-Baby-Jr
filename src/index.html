@@ -237,10 +237,6 @@
       margin: 2px 0 4px;
     }
 
-    .quickActions .primary {
-      grid-column: 1 / -1;
-    }
-
     .workflowStep legend::before {
       content: attr(data-step);
       display: inline-grid;
@@ -1395,7 +1391,7 @@
 
 
       <div class="quickActions template-only" aria-label="Primary actions">
-        <button class="primary" type="button" id="browseCommunityBtn">Browse Templates</button>
+        <button type="button" id="browseCommunityBtn">Browse Templates</button>
         <button type="button" id="loadProjectBtn">Load project</button>
         <input id="projectFile" type="file" accept="application/json,.json" hidden />
       </div>
