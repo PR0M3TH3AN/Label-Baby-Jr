@@ -1443,7 +1443,7 @@
     /* Feed wall */
     .feedLoadStatus{font-size:.78rem;color:var(--muted);padding:2px 2px 6px;font-style:italic;letter-spacing:.02em}
     .feedLoadStatus[hidden]{display:none}
-    .feedWall{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;margin-top:4px;max-height:68vh;overflow-y:auto;align-content:start}
+    .feedWall{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;margin-top:4px;align-content:start}
     .feedCard{border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#fff;cursor:pointer;display:flex;flex-direction:column;transition:box-shadow .12s}
     .feedCard:hover{box-shadow:0 4px 18px rgba(15,23,42,.13)}
     .feedCardThumb{width:100%;aspect-ratio:1;background:#f1f5f9;position:relative;display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0}
@@ -1488,6 +1488,12 @@
     body.nostr-logged-in .feedTrustToggle{display:flex}
     .feedTrustBadge{font-size:.62rem;background:rgba(0,184,230,.12);color:var(--accent);border:1px solid rgba(0,184,230,.25);border-radius:4px;padding:1px 5px;margin-left:5px;white-space:nowrap;flex-shrink:0}
     body.dark .feedTrustBadge{background:rgba(0,217,255,.1);border-color:rgba(0,217,255,.2)}
+    .feedCard.feedCardBlurred .feedCardThumb img,
+    .feedCard.feedCardBlurred .feedCardThumb canvas{filter:blur(14px) saturate(.5);transition:filter .15s}
+    .feedCardSoftModOverlay{position:absolute;inset:0;z-index:5;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;background:rgba(15,23,42,.55);color:#fff;padding:12px;text-align:center;font-size:.78rem;line-height:1.3}
+    .feedCardSoftModOverlay .softModLabel{font-weight:600;max-width:90%}
+    .feedCardSoftModOverlay button{font-size:.74rem;padding:5px 12px;border-radius:6px;border:1px solid rgba(255,255,255,.5);background:rgba(255,255,255,.12);color:#fff;cursor:pointer}
+    .feedCardSoftModOverlay button:hover{background:rgba(255,255,255,.22)}
     .feedTypeBtn{border:1px solid var(--line);border-radius:20px;padding:4px 13px;background:#fff;color:var(--muted);cursor:pointer;font-size:.78rem;font-weight:700}
     .feedTypeBtn.active{background:var(--accent);border-color:var(--accent);color:#fff}
     body.dark .feedTypeBtn{background:#0b1220;color:var(--muted);border-color:var(--line)}
@@ -2385,6 +2391,13 @@
         <summary style="font-weight:700;font-size:.82rem;cursor:pointer;color:var(--muted)">Blocked authors <span id="blockCountBadge">0</span></summary>
         <p class="hint">Blocked authors are hidden in all community feed views.</p>
         <div id="blockListContainer" class="hint">No blocked authors yet.</div>
+      </details>
+      <details id="softModDetails" style="margin-top:12px;border-top:1px solid var(--line);padding-top:10px;display:none">
+        <summary style="font-weight:700;font-size:.82rem;cursor:pointer;color:var(--muted)">Web-of-trust soft moderation</summary>
+        <label style="display:flex;align-items:flex-start;gap:8px;margin-top:8px;font-size:.78rem;cursor:pointer">
+          <input type="checkbox" id="softModEnabledToggle" style="accent-color:var(--accent);margin-top:2px" />
+          <span>Blur cards that ≥2 people you follow have muted or reported. Click <em>Show anyway</em> to reveal.</span>
+        </label>
       </details>
     </div>
   </div>
@@ -4964,8 +4977,10 @@
           throw new Error('Load cover artwork before publishing.');
         }
       }
+      const mode = normalizeTemplateMode(payload);
+      const dBase = state.meta.imdbId || state.meta.title;
       const tags = [
-        ['d', state.meta.imdbId || state.meta.title],
+        ['d', `${mode}:${dBase}`],
         ...getTemplateTags(payload, typeTag)
       ];
       const evt = { kind: 30078, created_at: Math.floor(Date.now() / 1000), tags, content: JSON.stringify(payload) };
@@ -4986,7 +5001,7 @@
         throw new Error('Add a title in Project Metadata or a custom design name before publishing.');
       }
       const tags = [
-        ['d', `${state.meta.imdbId || designName}`],
+        ['d', `disc-design:${state.meta.imdbId || designName}`],
         ...getTemplateTags(payload, 'casewrap-disc-design'),
         ['title', designName]
       ];
@@ -5196,6 +5211,18 @@
 
     const HOP2_CACHE_TTL_MS = 15 * 60 * 1000;
     const HOP2_MAX_HOP1_NODES = 500;
+    const MAX_HOP1_FOR_SOFTMOD = 500;
+    const SOFT_BLUR_THRESHOLD = 2;
+    const SOFT_MOD_ENABLED_KEY = 'casewrap:wot:softmod:enabled';
+
+    function softModEnabled() {
+      if (!normalizePubkey(state.community.myPubkey)) return false;
+      const raw = localStorage.getItem(SOFT_MOD_ENABLED_KEY);
+      return raw === null ? true : raw === '1';
+    }
+    function setSoftModEnabled(on) {
+      localStorage.setItem(SOFT_MOD_ENABLED_KEY, on ? '1' : '0');
+    }
 
     function hop2CacheKey(pubkey) { return `casewrap:wot:hop2:${pubkey}`; }
 
@@ -5250,6 +5277,96 @@
       state.community.myExtendedFollows = extended;
       state.community.hop2FetchedAt = Date.now();
       saveCachedHop2(myPubkey, extended);
+    }
+
+    function ensureSoftModBucket(authorPubkey) {
+      let bucket = _feedCache.softMod.get(authorPubkey);
+      if (!bucket) {
+        bucket = { mutedBy: new Set(), reportedBy: new Map(), eventReports: new Map() };
+        _feedCache.softMod.set(authorPubkey, bucket);
+      }
+      return bucket;
+    }
+
+    async function fetchSoftModSignal(relays, templateEvents) {
+      const myPubkey = normalizePubkey(state.community.myPubkey);
+      if (!myPubkey || !state.community.myFollows.length) return;
+      const hop1 = state.community.myFollows.slice(0, MAX_HOP1_FOR_SOFTMOD);
+      const authorsInFeed = new Set(templateEvents.map(e => e.pubkey).filter(Boolean));
+      const eventIdsInFeed = new Set(templateEvents.map(e => e.id).filter(Boolean));
+      const latestMute = new Map();
+      const BATCH = 50;
+      const muteRequests = [];
+      const reportRequests = [];
+      for (let i = 0; i < hop1.length; i += BATCH) {
+        const slice = hop1.slice(i, i + BATCH);
+        muteRequests.push(queryRelays(relays, { kinds: [10000], authors: slice }, { timeoutMs: 3500 }));
+        reportRequests.push(queryRelays(relays, { kinds: [1984], authors: slice, limit: 500 }, { timeoutMs: 3500 }));
+      }
+      const [muteBatches, reportBatches] = await Promise.all([
+        Promise.all(muteRequests),
+        Promise.all(reportRequests)
+      ]);
+      for (const events of muteBatches) {
+        for (const e of events) {
+          const prev = latestMute.get(e.pubkey);
+          if (!prev || e.created_at > prev.created_at) latestMute.set(e.pubkey, e);
+        }
+      }
+      for (const muteEvent of latestMute.values()) {
+        const reporter = normalizePubkey(muteEvent.pubkey);
+        if (!reporter) continue;
+        for (const tag of (muteEvent.tags || [])) {
+          if (tag[0] !== 'p' || !tag[1]) continue;
+          const author = normalizePubkey(tag[1]);
+          if (!author || !authorsInFeed.has(author)) continue;
+          ensureSoftModBucket(author).mutedBy.add(reporter);
+        }
+      }
+      for (const events of reportBatches) {
+        for (const e of events) {
+          const reporter = normalizePubkey(e.pubkey);
+          if (!reporter) continue;
+          const pTag = (e.tags || []).find(t => t[0] === 'p' && t[1]);
+          const eTag = (e.tags || []).find(t => t[0] === 'e' && t[1]);
+          const author = pTag ? normalizePubkey(pTag[1]) : '';
+          if (!author || !authorsInFeed.has(author)) continue;
+          const reason = (eTag && eTag[2]) || (pTag && pTag[2]) || 'other';
+          const bucket = ensureSoftModBucket(author);
+          if (!bucket.reportedBy.has(reporter)) bucket.reportedBy.set(reporter, reason);
+          if (eTag && eventIdsInFeed.has(eTag[1])) {
+            let evReporters = bucket.eventReports.get(eTag[1]);
+            if (!evReporters) { evReporters = new Set(); bucket.eventReports.set(eTag[1], evReporters); }
+            evReporters.add(reporter);
+          }
+        }
+      }
+    }
+
+    const REASON_LABELS = { spam: 'spam', nudity: 'nudity', illegal: 'illegal content', impersonation: 'impersonation', other: 'concerns', muted: 'mute' };
+
+    function dominantReason(bucket) {
+      const counts = new Map();
+      for (const reason of bucket.reportedBy.values()) counts.set(reason, (counts.get(reason) || 0) + 1);
+      if (!counts.size && bucket.mutedBy.size) return 'muted';
+      let best = 'other', bestN = 0;
+      for (const [reason, n] of counts) { if (n > bestN) { best = reason; bestN = n; } }
+      return best;
+    }
+
+    function computeSoftMod(row) {
+      if (!softModEnabled()) return null;
+      if (!row?.e?.pubkey) return null;
+      if (row.trust === 'self' || row.trust === 'trusted') return null;
+      const bucket = _feedCache.softMod?.get(row.e.pubkey);
+      if (!bucket) return null;
+      const reporters = new Set([
+        ...bucket.mutedBy,
+        ...bucket.reportedBy.keys(),
+        ...((bucket.eventReports.get(row.e.id) || new Set()))
+      ]);
+      if (reporters.size < SOFT_BLUR_THRESHOLD) return null;
+      return { count: reporters.size, reason: dominantReason(bucket) };
     }
 
     async function syncLocalBlocksToMuteList(actionLabel = 'update') {
@@ -5809,7 +5926,7 @@
     }
 
 
-    const _feedCache = { events: null, reactions: {}, profiles: {}, fetchedAt: 0, loading: false, relayKey: '', relayProgress: { responded: 0, total: 0 }, phase: '' };
+    const _feedCache = { events: null, reactions: {}, profiles: {}, fetchedAt: 0, loading: false, relayKey: '', relayProgress: { responded: 0, total: 0 }, phase: '', softMod: new Map(), softModRevealed: new Set() };
     let _currentFeedRerender = null;
     const FEED_PROGRESS_DEBOUNCE_MS = 150;
 
@@ -5890,6 +6007,7 @@
       _feedCache.relayKey = relayKey;
       _feedCache.reactions = {};
       _feedCache.profiles = {};
+      _feedCache.softMod = new Map();
       const activeRelays = getActiveRelays(relays, { includeCoolingDown: false });
       _feedCache.relayProgress = { responded: 0, total: activeRelays.length };
       _feedCache.phase = 'templates';
@@ -5962,6 +6080,11 @@
             }
           }
           notifyFeedProgress();
+
+          if (softModEnabled() && state.community.myFollows.length) {
+            await fetchSoftModSignal(relays, templateEvents);
+            notifyFeedProgress();
+          }
         }
         _feedCache.fetchedAt = Date.now();
       } finally {
@@ -5997,6 +6120,10 @@
         if (selNew) selNew.value = 'all';
         if (selPop) selPop.value = 'all';
       }
+      const softModBlock = $('softModDetails');
+      if (softModBlock) softModBlock.style.display = loggedIn ? '' : 'none';
+      const softModToggle = $('softModEnabledToggle');
+      if (softModToggle) softModToggle.checked = softModEnabled();
     }
     const _blockedAuthors = new Set();
     let _lastBlockedPubkey = '';
@@ -6252,7 +6379,8 @@
           const hay = `${displayTitle} ${title} ${imdb} ${category} ${language} ${(e.tags || []).map(t => t.join(' ')).join(' ')}`.toLowerCase();
           if (!hay.includes(q)) continue;
         }
-        const existing = address ? latestByAddress.get(address) : null;
+        const uiKey = address ? `${address}|${mode}` : '';
+        const existing = uiKey ? latestByAddress.get(uiKey) : null;
         const row = {
           e, payload,
           title: displayTitle || `(${mode})`,
@@ -6266,9 +6394,10 @@
           createdAt: e.created_at || 0,
           trust: trustTierForPubkey(e.pubkey)
         };
-        if (address) {
+        row.softMod = computeSoftMod(row);
+        if (uiKey) {
           if (!existing) {
-            latestByAddress.set(address, row);
+            latestByAddress.set(uiKey, row);
           }
         } else {
           rows.push(row);
@@ -6280,8 +6409,9 @@
     function deduplicateRows(rows) {
       const seen = new Map();
       for (const row of rows) {
-        const key = row.address || row.imdb || row.title?.toLowerCase().trim() || '';
-        if (!key) { seen.set(row.e.id, row); continue; }
+        const baseKey = row.address || row.imdb || row.title?.toLowerCase().trim() || '';
+        if (!baseKey) { seen.set(row.e.id, row); continue; }
+        const key = `${baseKey}|${row.mode}`;
         const existing = seen.get(key);
         if (!existing || row.reactions > existing.reactions) seen.set(key, row);
       }
@@ -6291,6 +6421,9 @@
     function buildFeedCard(row, onUse) {
       const el = document.createElement('div');
       el.className = 'feedCard';
+      const isRevealed = row.e?.id && _feedCache.softModRevealed.has(row.e.id);
+      const showBlur = row.softMod && !isRevealed;
+      if (showBlur) el.classList.add('feedCardBlurred');
       const isDisc = row.mode === 'disc' || row.mode === 'disc-design';
       const modeLabel = MODE_LABELS[row.mode] || row.mode;
       const thumb = document.createElement('div');
@@ -6308,6 +6441,27 @@
         img.alt = ''; img.loading = 'lazy'; img.src = row.preview;
         img.addEventListener('error', () => img.remove());
         thumb.insertBefore(img, lbl);
+      }
+      if (showBlur) {
+        const overlay = document.createElement('div');
+        overlay.className = 'feedCardSoftModOverlay';
+        const label = document.createElement('div');
+        label.className = 'softModLabel';
+        const reasonLabel = REASON_LABELS[row.softMod.reason] || row.softMod.reason;
+        label.textContent = row.softMod.reason === 'muted'
+          ? `Muted by ${row.softMod.count} people you follow`
+          : `Flagged by ${row.softMod.count} people you follow · ${reasonLabel}`;
+        const revealBtn = document.createElement('button');
+        revealBtn.type = 'button';
+        revealBtn.textContent = 'Show anyway';
+        revealBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (row.e?.id) _feedCache.softModRevealed.add(row.e.id);
+          el.classList.remove('feedCardBlurred');
+          overlay.remove();
+        });
+        overlay.append(label, revealBtn);
+        thumb.appendChild(overlay);
       }
       const meta = document.createElement('div');
       meta.className = 'feedCardMeta';
@@ -6348,7 +6502,10 @@
       });
       actions.append(makeReactionBtn(row), prevBtn, btn, blockBtn, reportBtn);
       el.append(thumb, meta, actions);
-      el.addEventListener('click', () => openDesignPreview(row));
+      el.addEventListener('click', () => {
+        if (el.classList.contains('feedCardBlurred')) return;
+        openDesignPreview(row);
+      });
       return el;
     }
 
@@ -6494,6 +6651,10 @@
           $('nostrModal').classList.remove('open');
         }));
       });
+      const scroller = wall.closest('.modalCard');
+      if (scroller && page.rendered < page.rows.length && scroller.scrollHeight <= scroller.clientHeight + 40) {
+        requestAnimationFrame(() => appendFeedRows(tab));
+      }
       return true;
     }
 
@@ -6501,14 +6662,15 @@
       const page = _feedPagination[tab];
       const wall = $(`feedWall${tab}`);
       if (!page || !wall || page.initialized) return;
-      wall.addEventListener('scroll', () => {
-        if (wall.scrollHeight <= wall.clientHeight) {
-          appendFeedRows(tab);
-          return;
-        }
-        if ((wall.scrollTop + wall.clientHeight) / wall.scrollHeight > 0.8) appendFeedRows(tab);
-      });
+      const scroller = wall.closest('.modalCard') || wall.parentElement;
+      const onScroll = () => {
+        if (!scroller) return;
+        const distanceFromBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+        if (distanceFromBottom < scroller.clientHeight * 0.4) appendFeedRows(tab);
+      };
+      if (scroller) scroller.addEventListener('scroll', onScroll);
       page.initialized = true;
+      page.scrollHandler = onScroll;
     }
 
     async function loadFeedTab(tab) {
@@ -7642,8 +7804,9 @@
           : state.templateMode === 'jewel'
             ? 'casewrap-jewel'
             : 'casewrap-cover';
+        const clipboardMode = normalizeTemplateMode(payload);
         const tags = [
-          ['d', state.meta.imdbId || state.meta.title || 'template'],
+          ['d', `${clipboardMode}:${state.meta.imdbId || state.meta.title || 'template'}`],
           ...getTemplateTags(payload, typeTag)
         ];
         const evt = { kind: 30078, created_at: Math.floor(Date.now()/1000), tags, content: JSON.stringify(payload) };
@@ -7653,7 +7816,7 @@
         alert("Signed Nostr event copied to clipboard");
       });
 
-      $("nostrClose").addEventListener("click", () => { closeNostrPreview(); $("nostrModal").classList.remove("open"); });
+      $("nostrClose").addEventListener("click", () => { closeNostrPreview(); $("nostrModal").classList.remove("open"); _feedCache.softModRevealed.clear(); });
       $("nostrRefreshBtn").addEventListener("click", async () => {
         const btn = $("nostrRefreshBtn");
         const original = btn.textContent;
@@ -8165,6 +8328,15 @@
       $('reportSubmitBtn').addEventListener('click', submitReport);
       $('reportCancelBtn').addEventListener('click', closeReportModal);
       $('reportModal').addEventListener('click', e => { if (e.target === $('reportModal')) closeReportModal(); });
+      const softModToggle = $('softModEnabledToggle');
+      if (softModToggle) {
+        softModToggle.checked = softModEnabled();
+        softModToggle.addEventListener('change', () => {
+          setSoftModEnabled(softModToggle.checked);
+          _feedCache.fetchedAt = 0;
+          refreshCommunityView();
+        });
+      }
     }
 
     init();
