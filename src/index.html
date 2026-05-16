@@ -2592,7 +2592,10 @@
     function normalizeImageUrl(raw) {
       const value = String(raw || '').trim();
       if (!value) throw new Error('Enter an image URL.');
-      const parsed = new URL(value, window.location.href);
+      if (!/^https?:\/\//i.test(value)) {
+        throw new Error('Use a full http or https image URL.');
+      }
+      const parsed = new URL(value);
       if (!['http:', 'https:'].includes(parsed.protocol)) {
         throw new Error('Use an http or https image URL.');
       }
