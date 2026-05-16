@@ -1810,6 +1810,10 @@
             <button type="button" id="communityPublishBtn">Publish to Nostr</button>
             <button type="button" id="nostrExportBtn">Copy Nostr event</button>
           </div>
+          <div class="miniReadout" id="templatePublishReadout">No template has been published yet.</div>
+          <div class="buttonRow">
+            <button type="button" id="copyTemplateEventIdBtn">Copy event ID</button>
+          </div>
           <p class="hint">Publishing requires a Nostr browser extension (Alby, nos2x).</p>
         </details>
       </fieldset>
@@ -2105,6 +2109,10 @@
             <button type="button" id="designerPublishBtn">Publish to Nostr</button>
             <button type="button" id="designerLoadProjectBtn">Search Nostr</button>
           </div>
+          <div class="miniReadout" id="designerPublishReadout">No disc design has been published yet.</div>
+          <div class="buttonRow">
+            <button type="button" id="copyDesignerEventIdBtn">Copy event ID</button>
+          </div>
           <p class="hint">Disc designs publish as reusable single-disc designs. Publishing requires a Nostr browser extension.</p>
         </details>
       </fieldset>
@@ -2244,6 +2252,7 @@
           <div id="nostrPreviewActions" style="display:none;gap:8px;align-items:center;flex-wrap:wrap;">
             <button type="button" id="previewSaveJsonBtn">Save JSON</button>
           </div>
+          <button type="button" id="nostrRefreshBtn">Refresh</button>
           <button type="button" id="nostrBackBtn" style="display:none">← Back</button>
           <button type="button" id="nostrClose">Close</button>
         </div>
@@ -2468,8 +2477,12 @@
       'wss://relay.primal.net',
       'wss://relay.snort.social',
       'wss://relay.nostr.band',
-      'wss://relay.nos.social'
+      'wss://relay.nostr.pub'
     ];
+    const RELAY_HEALTH_CACHE_KEY = 'casewrap-relay-health';
+    const RELAY_FAILURE_COOLDOWN_MS = 10 * 60 * 1000;
+    const RELAY_FAILURE_MAX_COOLDOWN_MS = 60 * 60 * 1000;
+    const RELAY_HEALTH_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
     const state = {
       meta: { title: "", imdbId: "", omdbApiKey: "", category: "", language: "en" },
@@ -2532,6 +2545,8 @@
         myPubkey: '',
         myProfile: null,
         myFollows: [],
+        relayHealth: loadRelayHealth(),
+        lastPublish: null,
         status: 'Refresh the feed when you want to browse Nostr templates.'
       }
     };
@@ -2555,6 +2570,12 @@
         .replace(/[^a-z0-9]+/g, '_')
         .replace(/^_+|_+$/g, '');
       return slug || fallback;
+    }
+
+    function shortEventId(id) {
+      const value = String(id || '').trim();
+      if (!value) return '';
+      return value.length <= 18 ? value : `${value.slice(0, 12)}…${value.slice(-8)}`;
     }
 
     function projectFileStem(kind, variant = '') {
@@ -2581,8 +2602,90 @@
     function splitRelayList(raw) {
       return String(raw || '')
         .split(/[\s,]+/g)
-        .map((relay) => relay.trim())
+        .map((relay) => relay.trim().replace(/\/+$/, ''))
         .filter(Boolean);
+    }
+
+    function loadRelayHealth() {
+      try {
+        const raw = localStorage.getItem(RELAY_HEALTH_CACHE_KEY);
+        const parsed = raw ? JSON.parse(raw) : {};
+        return parsed && typeof parsed === 'object' ? parsed : {};
+      } catch {
+        return {};
+      }
+    }
+
+    function saveRelayHealth(health) {
+      try {
+        const now = Date.now();
+        const next = {};
+        for (const [relay, entry] of Object.entries(health || {})) {
+          if (!relay || !entry) continue;
+          if (entry.lastSeenAt && now - entry.lastSeenAt > RELAY_HEALTH_MAX_AGE_MS) continue;
+          next[relay] = entry;
+        }
+        localStorage.setItem(RELAY_HEALTH_CACHE_KEY, JSON.stringify(next));
+      } catch {
+        // Ignore storage failures.
+      }
+    }
+
+    function normalizeRelayHealthRelay(relay) {
+      return String(relay || '').trim().replace(/\/+$/, '');
+    }
+
+    function getRelayHealth(relay) {
+      const key = normalizeRelayHealthRelay(relay);
+      if (!key) return null;
+      if (!state.community.relayHealth) state.community.relayHealth = loadRelayHealth();
+      return state.community.relayHealth[key] || null;
+    }
+
+    function relayIsCoolingDown(relay, now = Date.now()) {
+      const entry = getRelayHealth(relay);
+      return !!entry?.cooldownUntil && entry.cooldownUntil > now;
+    }
+
+    function getActiveRelays(relays = splitRelayList(state.community.relays), { includeCoolingDown = false } = {}) {
+      const list = (relays.length ? relays : DEFAULT_NOSTR_RELAYS).map(normalizeRelayHealthRelay).filter(Boolean);
+      if (includeCoolingDown) return list;
+      const active = list.filter((relay) => !relayIsCoolingDown(relay));
+      return active.length ? active : list;
+    }
+
+    function markRelaySuccess(relay) {
+      const key = normalizeRelayHealthRelay(relay);
+      if (!key) return;
+      if (!state.community.relayHealth) state.community.relayHealth = loadRelayHealth();
+      const current = state.community.relayHealth[key] || {};
+      state.community.relayHealth[key] = {
+        ...current,
+        failCount: 0,
+        lastError: '',
+        lastSuccessAt: Date.now(),
+        lastSeenAt: Date.now(),
+        cooldownUntil: 0
+      };
+      saveRelayHealth(state.community.relayHealth);
+    }
+
+    function markRelayFailure(relay, error = '') {
+      const key = normalizeRelayHealthRelay(relay);
+      if (!key) return;
+      if (!state.community.relayHealth) state.community.relayHealth = loadRelayHealth();
+      const current = state.community.relayHealth[key] || {};
+      const failCount = (current.failCount || 0) + 1;
+      const cooldownMs = Math.min(RELAY_FAILURE_MAX_COOLDOWN_MS, RELAY_FAILURE_COOLDOWN_MS * failCount);
+      state.community.relayHealth[key] = {
+        ...current,
+        failCount,
+        lastError: String(error || 'Relay failure').slice(0, 140),
+        lastFailureAt: Date.now(),
+        lastSeenAt: Date.now(),
+        cooldownUntil: Date.now() + cooldownMs
+      };
+      saveRelayHealth(state.community.relayHealth);
     }
 
     function shortPubkey(pubkey) {
@@ -2791,27 +2894,79 @@
     }
 
     async function publishToRelays(event, relays = splitRelayList(state.community.relays)) {
-      const sockets = relays.map((relay) => {
+      const targets = getActiveRelays(relays, { includeCoolingDown: false });
+      const results = await Promise.all(targets.map((relay) => new Promise((resolve) => {
+        let done = false;
+        let ws;
+        const finish = (result) => {
+          if (done) return;
+          done = true;
+          try { ws && ws.close(); } catch {}
+          resolve(result);
+        };
+
         try {
-          const ws = new WebSocket(relay);
-          ws.addEventListener('open', () => {
-            ws.send(JSON.stringify(['EVENT', event]));
-            ws.close();
-          });
-          return ws;
-        } catch {
-          return null;
+          ws = new WebSocket(relay);
+        } catch (error) {
+          markRelayFailure(relay, error?.message || 'Could not open websocket');
+          resolve({ relay, ok: false, error: error?.message || 'Could not open websocket' });
+          return;
         }
-      }).filter(Boolean);
-      await Promise.allSettled(sockets.map((ws) => new Promise((resolve) => {
-        ws.addEventListener('close', resolve, { once: true });
-        ws.addEventListener('error', resolve, { once: true });
-        setTimeout(resolve, 1200);
+
+        const timer = setTimeout(() => finish({ relay, ok: false, error: 'Publish timed out' }), 3500);
+
+        ws.addEventListener('open', () => {
+          try {
+            ws.send(JSON.stringify(['EVENT', event]));
+          } catch (error) {
+            clearTimeout(timer);
+            markRelayFailure(relay, error?.message || 'Could not send event');
+            finish({ relay, ok: false, error: error?.message || 'Could not send event' });
+          }
+        });
+
+        ws.addEventListener('message', (msg) => {
+          let data;
+          try {
+            data = JSON.parse(msg.data);
+          } catch {
+            return;
+          }
+          if (data[0] === 'OK') {
+            clearTimeout(timer);
+            if (data[2]) markRelaySuccess(relay); else markRelayFailure(relay, data[3] || 'Relay rejected event');
+            finish({ relay, ok: !!data[2], message: data[3] || '' });
+          }
+          if (data[0] === 'NOTICE') {
+            clearTimeout(timer);
+            markRelayFailure(relay, data[1] || 'Relay notice');
+            finish({ relay, ok: false, error: data[1] || 'Relay notice' });
+          }
+        });
+
+        ws.addEventListener('error', () => {
+          if (done) return;
+          clearTimeout(timer);
+          markRelayFailure(relay, 'Websocket error');
+          finish({ relay, ok: false, error: 'Websocket error' });
+        });
+        ws.addEventListener('close', () => {
+          if (done) return;
+          clearTimeout(timer);
+          markRelayFailure(relay, 'Relay closed the connection');
+          finish({ relay, ok: false, error: 'Relay closed the connection' });
+        });
       })));
+      const accepted = results.filter((result) => result && result.ok);
+      if (!accepted.length) {
+        const detail = results.find((result) => result && result.error)?.error || 'No relay accepted the event.';
+        throw new Error(`Publish failed: ${detail}`);
+      }
+      return { accepted, results };
     }
 
     async function queryRelays(relays, filters, { timeoutMs = 3500 } = {}) {
-      const relayList = relays.length ? relays : DEFAULT_NOSTR_RELAYS;
+      const relayList = getActiveRelays(relays, { includeCoolingDown: false });
       const events = new Map();
 
       await Promise.all(relayList.map((relay) => new Promise((resolve) => {
@@ -2827,6 +2982,7 @@
         try {
           ws = new WebSocket(relay);
         } catch {
+          markRelayFailure(relay, 'Could not open websocket');
           resolve();
           return;
         }
@@ -2838,6 +2994,7 @@
             ws.send(JSON.stringify(['REQ', subId, filters]));
           } catch {
             clearTimeout(timer);
+            markRelayFailure(relay, 'Could not send query');
             finish();
           }
         });
@@ -2850,19 +3007,43 @@
           }
           if (data[0] === 'EVENT' && data[1] === subId && data[2]?.id) {
             events.set(data[2].id, data[2]);
+            markRelaySuccess(relay);
           }
           if (data[0] === 'EOSE' && data[1] === subId) {
             clearTimeout(timer);
+            markRelaySuccess(relay);
             finish();
           }
         });
         ws.addEventListener('error', () => {
+          if (done) return;
           clearTimeout(timer);
+          markRelayFailure(relay, 'Websocket error');
+          finish();
+        });
+        ws.addEventListener('close', () => {
+          if (done) return;
+          clearTimeout(timer);
+          markRelayFailure(relay, 'Relay closed the connection');
           finish();
         });
       })));
 
       return [...events.values()].sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+    }
+
+    async function verifyEventOnRelays(event, relays = splitRelayList(state.community.relays), attempts = 3) {
+      if (!event?.id) return { verified: false, attempts: 0, matches: [] };
+      for (let attempt = 1; attempt <= attempts; attempt++) {
+        const matches = await queryRelays(getActiveRelays(relays), { ids: [event.id], limit: 1 }, { timeoutMs: 2500 + (attempt * 500) });
+        if (matches.some((item) => item.id === event.id)) {
+          return { verified: true, attempts: attempt, matches };
+        }
+        if (attempt < attempts) {
+          await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
+        }
+      }
+      return { verified: false, attempts, matches: [] };
     }
 
     function eventAuthorProfile(event) {
@@ -3000,8 +3181,8 @@
       return topLanguage || bottomLanguage || 'en';
     }
 
-    function syncProjectMetaFromDiscMeta() {
-      if (state.templateMode !== 'disc') return;
+    function syncProjectMetaFromDiscMeta(force = false) {
+      if (!force && state.templateMode !== 'disc') return;
       const nextTitle = preferredDiscProjectTitle();
       const nextImdb = preferredDiscProjectImdb();
       const nextCategory = preferredDiscProjectCategory();
@@ -3106,13 +3287,14 @@
       const dl = $('designerLanguageField'); if (dl) dl.value = state.meta?.language || 'en';
       const metadataFieldset = $('metadataFieldset');
       if (metadataFieldset) metadataFieldset.style.display = state.templateMode === 'disc' ? 'none' : '';
-      if (state.templateMode === 'disc') syncProjectMetaFromDiscMeta();
+      if (state.templateMode === 'disc' && state.appMode !== 'designer') syncProjectMetaFromDiscMeta(true);
       $('showBleed').checked = state.showBleed;
       $('showCrops').checked = state.showCrops;
       $('printGuides').checked = state.printGuides;
       $('printCrops').checked = state.printCrops;
       const stt = $('spineTextTop'); if (stt) stt.value = state.discSpineLabels?.top || '';
       const stb = $('spineTextBottom'); if (stb) stb.value = state.discSpineLabels?.bottom || '';
+      syncPublishReadout();
       syncModeTabsUI();
     }
 
@@ -3730,6 +3912,7 @@
                     state.discs[key].layers = layersToUse.map(l => ({ ...l }));
                   }
                   if (state.templateMode !== 'disc') state.templateMode = 'disc';
+                  syncProjectMetaFromDiscMeta(true);
                   syncInputs();
                   syncAllDiscInputs();
                   render();
@@ -3738,7 +3921,7 @@
                 } else if (parsed?.discTemplate?.discs?.[key]) {
                   state.discs[key] = parsed.discTemplate.discs[key];
                   state.discMeta[key] = { ...state.discMeta[key], ...discSlotMetaFromPayload(parsed, key, parsed.discTemplate.discs[key]) };
-                  syncProjectMetaFromDiscMeta();
+                  syncProjectMetaFromDiscMeta(true);
                   syncAllDiscInputs();
                   render();
                   const preview = $(`disc-preview-${key}`);
@@ -4523,7 +4706,6 @@
       const relays = splitRelayList(state.community.relays);
       const kinds = communityKindKinds();
       const filter = { kinds, limit: 120 };
-      if (kinds.includes(30078)) filter['#t'] = ['casewrap'];
       const items = await queryRelays(relays, filter, { timeoutMs: 4000 });
       const q = state.community.query.trim().toLowerCase();
       const filtered = items.filter((event) => {
@@ -4711,8 +4893,7 @@
       ];
       const evt = { kind: 30078, created_at: Math.floor(Date.now() / 1000), tags, content: JSON.stringify(payload) };
       const signed = await publishCommunityEvent(evt);
-      cachePublishedTemplateEvent(signed);
-      state.community.status = `Published "${state.meta.title}" to Nostr.`;
+      await finalizePublishedTemplateEvent(signed, { label: `Template "${state.meta.title}"` });
       return signed;
     }
 
@@ -4740,13 +4921,13 @@
         content: JSON.stringify(payload)
       };
       const signed = await publishCommunityEvent(evt);
-      cachePublishedTemplateEvent(signed);
-      state.community.status = `Published ${designName} to Nostr.`;
+      await finalizePublishedTemplateEvent(signed, { label: `Disc design "${designName}"` });
       return signed;
     }
 
     function cachePublishedTemplateEvent(event) {
       if (!event || (event.kind !== 30078 && event.kind !== 5)) return;
+      persistPublishedTemplateEvent(event);
       if (!_feedCache.events) _feedCache.events = [];
       _feedCache.events = [event, ..._feedCache.events.filter(e => e.id !== event.id)];
       _feedCache.fetchedAt = Date.now();
@@ -4754,14 +4935,41 @@
     }
 
     function mergeCachedPublishedEvents(events) {
-      const merged = new Map();
-      for (const event of events || []) {
-        if (event?.id) merged.set(event.id, event);
-      }
-      for (const event of _feedCache.events || []) {
-        if (event?.id) merged.set(event.id, event);
-      }
-      return [...merged.values()];
+      return mergePublishedTemplateEvents([...(events || []), ...(_feedCache.events || [])]);
+    }
+
+    function syncPublishReadout() {
+      const last = state.community.lastPublish;
+      const base = last
+        ? `Event ID: ${last.id}${last.verified ? ' • verified on relays' : ' • not yet verified on relays'}`
+        : 'No template has been published yet.';
+      const detail = last
+        ? `Kind ${last.kind || 30078}${last.label ? ` • ${last.label}` : ''}${last.attempts ? ` • checked ${last.attempts} time${last.attempts === 1 ? '' : 's'}` : ''}`
+        : '';
+      const text = detail ? `${base}\n${detail}` : base;
+      const templateReadout = $('templatePublishReadout');
+      if (templateReadout) templateReadout.textContent = text;
+      const designerReadout = $('designerPublishReadout');
+      if (designerReadout) designerReadout.textContent = last?.label === 'Disc design' ? text : (last ? text : 'No disc design has been published yet.');
+    }
+
+    async function finalizePublishedTemplateEvent(signed, { label = 'Template' } = {}) {
+      cachePublishedTemplateEvent(signed);
+      const verification = await verifyEventOnRelays(signed);
+      state.community.lastPublish = {
+        id: signed.id,
+        kind: signed.kind,
+        label,
+        verified: verification.verified,
+        attempts: verification.attempts,
+        created_at: signed.created_at,
+        relays: splitRelayList(state.community.relays)
+      };
+      state.community.status = verification.verified
+        ? `${label} published. Event ${shortEventId(signed.id)} verified on relays.`
+        : `${label} published. Event ${shortEventId(signed.id)} not yet verified on relays.`;
+      syncPublishReadout();
+      return { signed, verification };
     }
 
     async function publishCommunityNote(text, replyToEvent = null) {
@@ -5291,7 +5499,7 @@
           selectedLayerId: ''
         });
         normalizeDiscState();
-        syncProjectMetaFromDiscMeta();
+        syncProjectMetaFromDiscMeta(true);
         syncInputs(); syncAllDiscInputs(); render();
         return;
       }
@@ -5362,7 +5570,7 @@
       Object.assign(state, next);
       normalizeDiscState();
       normalizeJewelState();
-      syncProjectMetaFromDiscMeta();
+                  syncProjectMetaFromDiscMeta(true);
       syncInputs();
       syncAllSlotInputs();
       syncAllDiscInputs();
@@ -5373,6 +5581,44 @@
 
 
     const _feedCache = { events: null, reactions: {}, profiles: {}, fetchedAt: 0, loading: false, relayKey: '' };
+    let _nostrBrowseTab = 'New';
+    const PUBLISHED_TEMPLATE_CACHE_KEY = 'casewrap-published-template-events';
+
+    function loadPersistedPublishedTemplateEvents() {
+      try {
+        const raw = localStorage.getItem(PUBLISHED_TEMPLATE_CACHE_KEY);
+        const parsed = raw ? JSON.parse(raw) : [];
+        return Array.isArray(parsed) ? parsed.filter((event) => event && event.id) : [];
+      } catch {
+        return [];
+      }
+    }
+
+    function savePersistedPublishedTemplateEvents(events) {
+      try {
+        localStorage.setItem(PUBLISHED_TEMPLATE_CACHE_KEY, JSON.stringify(events.slice(0, 150)));
+      } catch {
+        // Ignore storage failures.
+      }
+    }
+
+    function persistPublishedTemplateEvent(event) {
+      if (!event || (event.kind !== 30078 && event.kind !== 5) || !event.id) return;
+      const existing = loadPersistedPublishedTemplateEvents().filter((item) => item.id !== event.id);
+      existing.unshift(event);
+      savePersistedPublishedTemplateEvents(existing);
+    }
+
+    function mergePublishedTemplateEvents(events = []) {
+      const merged = new Map();
+      for (const event of events || []) {
+        if (event?.id) merged.set(event.id, event);
+      }
+      for (const event of loadPersistedPublishedTemplateEvents()) {
+        if (event?.id) merged.set(event.id, event);
+      }
+      return [...merged.values()];
+    }
 
     function invalidateFeedCache() {
       _feedCache.events = null;
@@ -5391,10 +5637,10 @@
       _feedCache.relayKey = relayKey;
       try {
         const [templateEvents, deletionEvents] = await Promise.all([
-          queryRelays(relays, { kinds: [30078], '#t': ['casewrap'], limit: 200 }, { timeoutMs: 4500 }),
-          queryRelays(relays, { kinds: [5], '#t': ['casewrap'], limit: 100 }, { timeoutMs: 3500 })
+          queryRelays(relays, { kinds: [30078], limit: 200 }, { timeoutMs: 4500 }),
+          queryRelays(relays, { kinds: [5], limit: 100 }, { timeoutMs: 3500 })
         ]);
-        const events = [...templateEvents, ...deletionEvents];
+        const events = mergePublishedTemplateEvents([...templateEvents, ...deletionEvents]);
         _feedCache.events = events;
         _feedCache.reactions = {};
         _feedCache.profiles = {};
@@ -5610,7 +5856,7 @@
       wall.innerHTML = '<div class="hint" style="grid-column:1/-1">Loading your designs…</div>';
       const relays = splitRelayList(state.community.relays);
       const events = await queryRelays(relays, {
-        kinds: [30078, 5], '#t': ['casewrap'],
+        kinds: [30078, 5],
         authors: [state.community.myPubkey], limit: 100
       }, { timeoutMs: 4500 });
       // Fetch reactions for user's own events
@@ -5651,6 +5897,7 @@
     }
 
     function switchModalTab(tab) {
+      _nostrBrowseTab = tab;
       for (const t of ['New', 'Popular', 'Search', 'Mine']) {
         const tabEl = $(`tab${t}`);
         const panelEl = $(`panel${t}`);
@@ -5659,6 +5906,24 @@
       }
       if (tab === 'New' || tab === 'Popular') loadFeedTab(tab);
       if (tab === 'Mine') loadMyDesigns();
+    }
+
+    async function refreshNostrBrowser() {
+      invalidateFeedCache();
+      const tab = _nostrBrowseTab || 'New';
+      if (tab === 'Search') {
+        await runNostrSearch();
+        return;
+      }
+      if (tab === 'Mine') {
+        await loadMyDesigns();
+        return;
+      }
+      if (tab === 'New' || tab === 'Popular') {
+        await loadFeedTab(tab);
+        return;
+      }
+      await loadFeedTab('New');
     }
 
     async function loadFeedTab(tab) {
@@ -6550,12 +6815,14 @@
           if (layersToUse.length > 0) {
             state.discs[slotKey].layers = layersToUse.map(l => ({ ...l }));
           }
+                  syncProjectMetaFromDiscMeta(true);
           const preview = $(`disc-preview-${slotKey}`);
           if (preview) preview.textContent = design.name || 'Design loaded';
         } else {
           state.discDesign = { ...state.discDesign, ...design };
-          if (payload.meta) {
-            state.meta = { ...state.meta, ...payload.meta };
+          const importMeta = payload.meta || design.meta || payload.discDesign?.meta || payload.discTemplate?.meta || payload.discMeta || {};
+          if (importMeta && Object.keys(importMeta).length) {
+            state.meta = { ...state.meta, ...importMeta };
           }
           if (Array.isArray(payload.layers)) {
             state.discDesign.layers = payload.layers.map(l => ({ ...l, target: 'designer-disc' }));
@@ -6571,18 +6838,21 @@
           if (layersToUse2.length > 0) {
             state.discs[slotKey].layers = layersToUse2.map(l => ({ ...l }));
           }
+      syncProjectMetaFromDiscMeta(true);
           const preview = $(`disc-preview-${slotKey}`);
           if (preview) preview.textContent = design.name || 'Design loaded';
         } else {
           state.discDesign = { ...state.discDesign, ...design };
-          if (payload.meta) {
-            state.meta = { ...state.meta, ...payload.meta };
+          const importMeta = payload.meta || design.meta || payload.discDesign?.meta || payload.discTemplate?.meta || payload.discMeta || {};
+          if (importMeta && Object.keys(importMeta).length) {
+            state.meta = { ...state.meta, ...importMeta };
           }
           loadCurrentDiscDesignLayers();
         }
       } else if (payload?.discTemplate?.discs?.[slotKey]) {
         state.discs[slotKey] = payload.discTemplate.discs[slotKey];
         state.discMeta[slotKey] = { ...state.discMeta[slotKey], ...discSlotMetaFromPayload(payload, slotKey, payload.discTemplate.discs[slotKey]) };
+        syncProjectMetaFromDiscMeta(true);
         const preview = $(`disc-preview-${slotKey}`);
         if (preview) preview.textContent = 'Loaded from project';
       }
@@ -6596,6 +6866,11 @@
         if (!isSlotImport) { state.templateMode = 'disc'; state.appMode = 'template'; }
         buildDiscImportUI();
       }
+      if (isSlotImport) state.templateMode = 'disc';
+      if (isSlotImport || (!openDesigner && state.templateMode === 'disc')) {
+        syncProjectMetaFromDiscMeta(true);
+      }
+      syncInputs();
       syncAllDiscInputs();
       render();
     }
@@ -6774,7 +7049,29 @@
       });
 
       $("nostrClose").addEventListener("click", () => { closeNostrPreview(); $("nostrModal").classList.remove("open"); });
+      $("nostrRefreshBtn").addEventListener("click", async () => {
+        const btn = $("nostrRefreshBtn");
+        const original = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = 'Refreshing...';
+        try {
+          await refreshNostrBrowser();
+        } finally {
+          btn.disabled = false;
+          btn.textContent = original;
+        }
+      });
       $("nostrBackBtn").addEventListener("click", closeNostrPreview);
+      $("copyTemplateEventIdBtn").addEventListener("click", () => {
+        const id = state.community.lastPublish?.id;
+        if (!id) return alert('Publish a template first.');
+        navigator.clipboard.writeText(id);
+      });
+      $("copyDesignerEventIdBtn").addEventListener("click", () => {
+        const id = state.community.lastPublish?.id;
+        if (!id) return alert('Publish a disc design first.');
+        navigator.clipboard.writeText(id);
+      });
       $("nostrRunSearch").addEventListener("click", runNostrSearch);
       $("tabNew").addEventListener("click", () => switchModalTab('New'));
       $("tabPopular").addEventListener("click", () => switchModalTab('Popular'));
