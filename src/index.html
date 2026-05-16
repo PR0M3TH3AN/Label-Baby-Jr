@@ -506,12 +506,9 @@
     body.dark .appModeTab.active { color: #fff; }
 
     body.app-template .designer-only { display: none !important; }
-    body.app-designer .template-only { display: none !important; }
+    body.app-designer .template-only:not(#layersFieldset) { display: none !important; }
     body.app-designer label[for="layerTarget"],
     body.app-designer #layerTarget { display: none !important; }
-    /* Layers panel hides in Template tab when in disc-sheet mode — disc layers live in the Designer */
-    body.app-template.template-disc #layersFieldset,
-    body.app-template.template-jewel #layersFieldset { display: none !important; }
 
     /* Designer single-disc preview */
     body.app-designer .sheetWrap { display: none !important; }
@@ -999,6 +996,29 @@
       z-index: 14;
       pointer-events: none;
       display: var(--safe-display, block);
+    }
+
+    .jewelSpineLabel {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      z-index: 13;
+      pointer-events: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+    .jewelSpineLabel span {
+      writing-mode: vertical-rl;
+      transform: rotate(180deg);
+      font-size: 7pt;
+      font-weight: 700;
+      color: rgba(15, 23, 42, .82);
+      letter-spacing: .04em;
+      white-space: nowrap;
+      max-height: 4.5in;
+      overflow: hidden;
     }
 
     .designerLayerOverlay {
@@ -1490,6 +1510,9 @@
     body.dark .feedTrustBadge{background:rgba(0,217,255,.1);border-color:rgba(0,217,255,.2)}
     .feedCard.feedCardBlurred .feedCardThumb img,
     .feedCard.feedCardBlurred .feedCardThumb canvas{filter:blur(14px) saturate(.5);transition:filter .15s}
+    .feedCard.feedCardBroken{opacity:.55}
+    .feedCard.feedCardBroken .feedCardThumb{background:repeating-linear-gradient(45deg,#f1f5f9,#f1f5f9 10px,#e2e8f0 10px,#e2e8f0 20px)}
+    .feedCardBrokenBadge{position:absolute;top:6px;right:6px;background:rgba(220,38,38,.92);color:#fff;font-size:.62rem;font-weight:700;border-radius:4px;padding:2px 6px;z-index:6;letter-spacing:.03em}
     .feedCardSoftModOverlay{position:absolute;inset:0;z-index:5;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;background:rgba(15,23,42,.55);color:#fff;padding:12px;text-align:center;font-size:.78rem;line-height:1.3}
     .feedCardSoftModOverlay .softModLabel{font-weight:600;max-width:90%}
     .feedCardSoftModOverlay button{font-size:.74rem;padding:5px 12px;border-radius:6px;border:1px solid rgba(255,255,255,.5);background:rgba(255,255,255,.12);color:#fff;cursor:pointer}
@@ -1499,7 +1522,16 @@
     body.dark .feedTypeBtn{background:#0b1220;color:var(--muted);border-color:var(--line)}
     body.dark .feedTypeBtn.active{color:#fff}
     .feedCategorySelect{width:auto;min-width:130px;padding:5px 8px;font-size:.78rem}
-    .welcomeCard { max-width: 640px; }
+    .welcomeCard { max-width: 900px; width: min(900px, 92vw); }
+    .welcomeSearchRow { display:grid; grid-template-columns: 1fr 160px 160px auto; gap:8px; align-items:end; margin-bottom:12px; }
+    .welcomeTabs { display:flex; gap:6px; border-bottom:1px solid var(--line); margin:4px 0 10px; flex-wrap:wrap; }
+    .welcomeTab { background:transparent; border:0; padding:8px 14px; cursor:pointer; font-weight:700; color:var(--muted); border-bottom:2px solid transparent; font-size:.85rem; }
+    .welcomeTab.active { color:var(--accent); border-bottom-color:var(--accent); }
+    .welcomeFooter { margin-top:16px; padding-top:14px; border-top:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; }
+    .welcomeFooter .hint { margin:0; }
+    @media (max-width: 720px) {
+      .welcomeSearchRow { grid-template-columns: 1fr 1fr; }
+    }
 
     @media (max-width: 900px) {
       .app { grid-template-columns: 1fr; }
@@ -1946,12 +1978,24 @@
           <button type="button" class="danger" id="clearJewelBtn">Clear jewel inserts</button>
         </div>
         <p class="hint">Avery 8693 prints two jewel-case inserts on one Letter sheet: a front insert and a tray insert.</p>
+        <details style="margin-top:10px">
+          <summary style="font-weight:700;font-size:.86rem;cursor:pointer">Spine text (optional)</summary>
+          <div class="row" style="margin-top:8px">
+            <div>
+              <label for="jewelSpineTextLeft">Left spine text</label>
+              <input id="jewelSpineTextLeft" type="text" placeholder="e.g. Movie Title" />
+            </div>
+            <div>
+              <label for="jewelSpineTextRight">Right spine text</label>
+              <input id="jewelSpineTextRight" type="text" placeholder="e.g. Movie Title" />
+            </div>
+          </div>
+          <p class="hint">Text appears on the two narrow tray-insert spines that wrap the jewel case. Leave blank to skip.</p>
+        </details>
       </fieldset>
 
       <fieldset class="workflowStep designer-only" id="designerFieldset">
         <legend data-step="1">Disc Design</legend>
-        <label for="designerName">Design name</label>
-        <input id="designerName" type="text" placeholder="e.g. Front of disc" />
         <label for="designerUrl">Image URL</label>
         <div class="urlRow">
           <input id="designerUrl" type="url" placeholder="https://example.com/disc.jpg" />
@@ -2215,6 +2259,8 @@
                 <img class="art" id="art-jewel-tray" alt="CD jewel tray insert art" hidden />
                 <div class="jewelSpineGuide" id="jewel-tray-spine-left" aria-hidden="true"></div>
                 <div class="jewelSpineGuide" id="jewel-tray-spine-right" aria-hidden="true"></div>
+                <div class="jewelSpineLabel" id="jewel-spine-label-left" aria-hidden="true"></div>
+                <div class="jewelSpineLabel" id="jewel-spine-label-right" aria-hidden="true"></div>
               </div>
             </div>
             <div class="layerOverlay" id="layerOverlay"></div>
@@ -2237,19 +2283,26 @@
 
   <div class="modal" id="welcomeModal" aria-hidden="true">
     <div class="modalCard welcomeCard">
-      <h2 style="margin:0 0 6px">Welcome to CaseWrap Studio</h2>
-      <p class="subhead" style="margin:0 0 16px">Design printable DVD and Blu-ray case wraps and disc labels.</p>
-      <p style="margin:0 0 12px; font-weight:600">Search first — a community template may already exist for your title:</p>
-      <div class="searchGrid">
-        <div><label for="welcomeQuery">Title or IMDb ID</label><input id="welcomeQuery" type="text" placeholder="e.g. The Matrix or tt0133093" /></div>
-        <div><label for="welcomeType">Type</label><select id="welcomeType"><option value="any">Any type</option><option value="cover">Case cover</option><option value="disc">Disc labels</option><option value="jewel">CD jewel inserts</option></select></div>
-        <div><label for="welcomeCategory">Category</label><select id="welcomeCategory" class="categorySelect"></select></div>
+      <h2 style="margin:0 0 4px">Welcome to CaseWrap Studio</h2>
+      <p class="subhead" style="margin:0 0 14px">Browse community templates or start your own.</p>
+      <div class="welcomeSearchRow">
+        <div><label for="welcomeQuery" style="font-size:.78rem">Title or IMDb ID</label><input id="welcomeQuery" type="text" placeholder="e.g. The Matrix or tt0133093" /></div>
+        <div><label for="welcomeType" style="font-size:.78rem">Type</label><select id="welcomeType"><option value="any">Any type</option><option value="cover">Case cover</option><option value="disc">Disc labels</option><option value="jewel">CD jewel inserts</option><option value="disc-design">Disc designs</option></select></div>
+        <div><label for="welcomeCategory" style="font-size:.78rem">Category</label><select id="welcomeCategory" class="categorySelect"></select></div>
         <div class="buttonRow" style="margin:0"><button type="button" id="welcomeSearchBtn" class="primary">Search</button></div>
       </div>
-      <div class="results" id="welcomeResults"></div>
-      <div style="margin-top:18px; padding-top:14px; border-top:1px solid var(--line); text-align:center">
-        <p class="hint" style="margin:0 0 10px">No templates found for your title? Start designing your own.</p>
-        <button type="button" id="welcomeSkipBtn">Start from scratch →</button>
+      <div class="welcomeTabs" role="tablist" aria-label="Browse">
+        <button type="button" class="welcomeTab active" id="welcomeTabNew" data-welcome-tab="New" role="tab">New</button>
+        <button type="button" class="welcomeTab" id="welcomeTabPopular" data-welcome-tab="Popular" role="tab">Popular</button>
+        <button type="button" class="welcomeTab" id="welcomeTabSearch" data-welcome-tab="Search" role="tab" style="display:none">Search results</button>
+      </div>
+      <div class="feedWall" id="welcomeResults"></div>
+      <div class="welcomeFooter">
+        <p class="hint">Or start with a blank canvas.</p>
+        <div class="buttonRow" style="margin:0">
+          <button type="button" id="welcomeBrowseAllBtn">Browse all designs →</button>
+          <button type="button" id="welcomeSkipBtn">Start from scratch →</button>
+        </div>
       </div>
     </div>
   </div>
@@ -2483,6 +2536,20 @@
       { key: 'front', label: 'Front cover' }
     ];
 
+    function templateLayerTargetsForMode() {
+      if (state.templateMode === 'disc') return [
+        { key: 'page', label: 'Whole page' },
+        { key: 'disc-top', label: 'Disc 1' },
+        { key: 'disc-bottom', label: 'Disc 2' }
+      ];
+      if (state.templateMode === 'jewel') return [
+        { key: 'page', label: 'Whole page' },
+        { key: 'jewel-front', label: 'Jewel front insert' },
+        { key: 'jewel-tray', label: 'Jewel tray insert' }
+      ];
+      return TEMPLATE_LAYER_TARGETS;
+    }
+
     const discTemplate = {
       sheetW: 8.5,
       sheetH: 11,
@@ -2597,6 +2664,7 @@
       },
       discDesign: { name: '', src: '', fit: 'cover', zoom: 1, x: 0, y: 0, rotate: 0 },
       discSpineLabels: { top: '', bottom: '' },
+      jewelSpineLabels: { left: '', right: '' },
       jewelInserts: {
         front: { src: '', fit: 'cover', zoom: 1, x: 0, y: 0, rotate: 0 },
         tray: { src: '', fit: 'cover', zoom: 1, x: 0, y: 0, rotate: 0 }
@@ -2891,6 +2959,21 @@
       if (payload.coverTemplate || payload.slots || payload.combined) return 'cover';
       if (payload.jewelTemplate || payload.jewelInserts) return 'jewel';
       return 'disc';
+    }
+
+    function discSheetDisplayTitle(payload = {}) {
+      const meta = payload?.discTemplate?.meta || payload?.discMeta || {};
+      const discs = payload?.discTemplate?.discs || payload?.discs || {};
+      const slotOrder = ['top', 'bottom'];
+      const titles = [];
+      for (const key of slotOrder) {
+        if (!discs?.[key]?.src) continue;
+        const slotTitle = (meta?.[key]?.title || '').trim();
+        if (slotTitle) titles.push(slotTitle);
+      }
+      if (!titles.length) return '';
+      if (titles.length === 1) return titles[0];
+      return titles.join(' + ');
     }
 
     function templateTypeForMode(mode = state.templateMode) {
@@ -3225,6 +3308,7 @@
           ...(state.jewelInserts[key] || {})
         };
       }
+      state.jewelSpineLabels = { left: '', right: '', ...(state.jewelSpineLabels || {}) };
     }
 
     function normalizeDiscMeta(meta = {}) {
@@ -3384,6 +3468,8 @@
       $('printCrops').checked = state.printCrops;
       const stt = $('spineTextTop'); if (stt) stt.value = state.discSpineLabels?.top || '';
       const stb = $('spineTextBottom'); if (stb) stb.value = state.discSpineLabels?.bottom || '';
+      const jsl = $('jewelSpineTextLeft'); if (jsl) jsl.value = state.jewelSpineLabels?.left || '';
+      const jsr = $('jewelSpineTextRight'); if (jsr) jsr.value = state.jewelSpineLabels?.right || '';
       syncPublishReadout();
       syncModeTabsUI();
     }
@@ -3409,6 +3495,7 @@
       document.body.classList.toggle('dark', !!state.darkMode);
       document.body.classList.toggle('app-designer', state.appMode === 'designer');
       document.body.classList.toggle('app-template', state.appMode !== 'designer');
+      updateLayerTargetOptions();
     }
 
     function renderDimensions() {
@@ -3833,8 +3920,7 @@
 
     function syncDesignerInputs() {
       const design = state.discDesign;
-      const nameEl = $('designerName');
-      if (nameEl) nameEl.value = design.name || '';
+      if (!design.name && state.meta?.title) design.name = state.meta.title;
       const urlEl = $('designerUrl');
       if (urlEl) urlEl.value = design.src || '';
       const fitEl = $('fit-designer');
@@ -4256,11 +4342,26 @@
         applyRotationCover(img, slot, insert?.x ?? 0, insert?.y ?? 0, insert?.rotate ?? 0, insert?.zoom ?? 1, insert?.fit || 'cover');
 
         if (slotDef.key === 'tray') {
+          const spineW = slotDef.spineW || 0.25;
           const leftGuide = $('jewel-tray-spine-left');
           const rightGuide = $('jewel-tray-spine-right');
           if (leftGuide && rightGuide) {
-            leftGuide.style.left = inches(slotDef.spineW || 0.25);
-            rightGuide.style.right = inches(slotDef.spineW || 0.25);
+            leftGuide.style.left = inches(spineW);
+            rightGuide.style.right = inches(spineW);
+          }
+          const leftLabel = $('jewel-spine-label-left');
+          const rightLabel = $('jewel-spine-label-right');
+          if (leftLabel) {
+            leftLabel.style.left = '0';
+            leftLabel.style.width = inches(spineW);
+            const text = state.jewelSpineLabels?.left || '';
+            leftLabel.innerHTML = text ? `<span>${escapeHtml(text)}</span>` : '';
+          }
+          if (rightLabel) {
+            rightLabel.style.right = '0';
+            rightLabel.style.width = inches(spineW);
+            const text = state.jewelSpineLabels?.right || '';
+            rightLabel.innerHTML = text ? `<span>${escapeHtml(text)}</span>` : '';
           }
         }
       }
@@ -4487,16 +4588,8 @@
         return;
       }
 
-      if (state.templateMode !== 'cover') {
-        const hint = document.createElement('p');
-        hint.className = 'hint';
-        hint.textContent = 'Layer panels are shown for case wraps.';
-        list.appendChild(hint);
-        return;
-      }
-
       const targetLayers = state.layers.filter((layer) => layer.target !== 'designer-disc' && !layer._generatedDiscLayer);
-      for (const targetDef of TEMPLATE_LAYER_TARGETS) {
+      for (const targetDef of templateLayerTargetsForMode()) {
         const panel = document.createElement('section');
         panel.className = 'templateLayerPanel';
 
@@ -5576,7 +5669,7 @@
         templateType,
         meta: state.meta,
         ui: { zoom: state.zoom, showGuides: state.showGuides, printGuides: state.printGuides },
-        jewelTemplate: { templateType, preset: 'jewel8693', config: jewelTemplate, inserts: state.jewelInserts },
+        jewelTemplate: { templateType, preset: 'jewel8693', config: jewelTemplate, inserts: state.jewelInserts, spineLabels: state.jewelSpineLabels },
         layers: nonGeneratedLayers().filter(l => String(l.target || '').startsWith('jewel'))
       };
     }
@@ -5602,7 +5695,7 @@
         discMeta: state.discMeta,
         ...(state.templateMode === 'disc-design' ? { discDesign: state.discDesign } : {}),
         discTemplate: { templateType: templateTypeForMode('disc'), config: discTemplate, discs: state.discs, spineLabels: state.discSpineLabels, meta: state.discMeta },
-        jewelTemplate: { templateType: templateTypeForMode('jewel'), preset: 'jewel8693', config: jewelTemplate, inserts: state.jewelInserts },
+        jewelTemplate: { templateType: templateTypeForMode('jewel'), preset: 'jewel8693', config: jewelTemplate, inserts: state.jewelInserts, spineLabels: state.jewelSpineLabels },
         layers: nonGeneratedLayers(),
         community: { relays: state.community.relays, query: state.community.query, kind: state.community.kind }
       };
@@ -5789,8 +5882,11 @@
     function loadProjectFromText(text) {
       const parsed = JSON.parse(text);
       if (parsed.version && parsed.templateMode === 'disc-design' && parsed.discDesign) {
-        importDiscDesignFromPayload(parsed, 'a');
+        importDiscDesignFromPayload(parsed, 'a', { openDesigner: true });
         return;
+      }
+      if (state.appMode === 'designer') {
+        switchAppMode('template');
       }
       const v = parsed.version || 0;
       const mode = parsed.templateMode || parsed.ui?.templateMode || '';
@@ -5851,6 +5947,7 @@
       }
 
       if (v >= 5 && mode === 'jewel' && parsed.jewelTemplate) {
+        const jewelSpineLabels = parsed.jewelTemplate?.spineLabels || parsed.jewelSpineLabels || null;
         Object.assign(state, {
           templateMode: 'jewel',
           meta: { ...state.meta, ...(parsed.meta || {}) },
@@ -5858,6 +5955,7 @@
           showGuides: parsed.ui?.showGuides ?? state.showGuides,
           printGuides: parsed.ui?.printGuides ?? state.printGuides,
           jewelInserts: { ...state.jewelInserts, ...(parsed.jewelTemplate?.inserts || {}) },
+          ...(jewelSpineLabels ? { jewelSpineLabels: { ...state.jewelSpineLabels, ...jewelSpineLabels } } : {}),
           layers: [
             ...state.layers.filter(l => !String(l.target || '').startsWith('jewel')),
             ...(Array.isArray(parsed.layers) ? parsed.layers : [])
@@ -5896,6 +5994,7 @@
             // backward compat: old discDesigns merged into discs below
             discSpineLabels: parsed.discTemplate?.spineLabels || parsed.discSpineLabels || state.discSpineLabels,
             jewelInserts: parsed.jewelTemplate?.inserts || parsed.jewelInserts || {},
+            jewelSpineLabels: parsed.jewelTemplate?.spineLabels || parsed.jewelSpineLabels || state.jewelSpineLabels,
             community: parsed.community || {},
             layers: Array.isArray(parsed.layers) ? parsed.layers : []
           }
@@ -5926,7 +6025,19 @@
     }
 
 
-    const _feedCache = { events: null, reactions: {}, profiles: {}, fetchedAt: 0, loading: false, relayKey: '', relayProgress: { responded: 0, total: 0 }, phase: '', softMod: new Map(), softModRevealed: new Set() };
+    const _feedCache = { events: null, reactions: {}, profiles: {}, fetchedAt: 0, loading: false, relayKey: '', relayProgress: { responded: 0, total: 0 }, phase: '', softMod: new Map(), softModRevealed: new Set(), brokenImages: new Set() };
+
+    function markImageBroken(url) {
+      if (!url) return;
+      _feedCache.brokenImages.add(url);
+      if (typeof _currentFeedRerender === 'function') {
+        clearTimeout(markImageBroken._t);
+        markImageBroken._t = setTimeout(() => { try { _currentFeedRerender(); } catch {} }, 200);
+      }
+    }
+    function isPreviewBroken(row) {
+      return !!(row?.preview && _feedCache.brokenImages.has(row.preview));
+    }
     let _currentFeedRerender = null;
     const FEED_PROGRESS_DEBOUNCE_MS = 150;
 
@@ -6369,7 +6480,11 @@
         const category = payload.meta?.category || payload.category || '';
         const language = payload.meta?.language || 'en';
         const mode = normalizeTemplateMode(payload);
-        const displayTitle = mode === 'disc-design' ? (payload.discDesign?.name || title || '') : title;
+        const displayTitle = mode === 'disc-design'
+          ? (payload.discDesign?.name || title || '')
+          : mode === 'disc'
+            ? (discSheetDisplayTitle(payload) || title)
+            : title;
         // Skip completely unidentifiable posts
         if (!displayTitle && !imdb) continue;
         if (typeFilter !== 'any' && mode !== typeFilter) continue;
@@ -6439,8 +6554,16 @@
       if (row.preview && row.mode !== 'disc') {
         const img = document.createElement('img');
         img.alt = ''; img.loading = 'lazy'; img.src = row.preview;
-        img.addEventListener('error', () => img.remove());
+        img.addEventListener('error', () => { img.remove(); markImageBroken(row.preview); });
         thumb.insertBefore(img, lbl);
+      }
+      const isBroken = isPreviewBroken(row);
+      if (isBroken) {
+        el.classList.add('feedCardBroken');
+        const badge = document.createElement('span');
+        badge.className = 'feedCardBrokenBadge';
+        badge.textContent = 'MISSING IMAGE';
+        thumb.appendChild(badge);
       }
       if (showBlur) {
         const overlay = document.createElement('div');
@@ -6590,10 +6713,12 @@
       rows.forEach(row => {
         wall.appendChild(buildFeedCard(row, () => {
           if (row.mode === 'disc-design') {
-            const target = state.appMode === 'designer'
-              ? ('a')
-              : (state._discImportTargetSlot || 'top');
-            importDiscDesignFromPayload(row.payload, target, { openDesigner: state.appMode === 'designer' });
+            const slotTarget = state._discImportTargetSlot;
+            if (slotTarget) {
+              importDiscDesignFromPayload(row.payload, slotTarget, { openDesigner: false });
+            } else {
+              importDiscDesignFromPayload(row.payload, 'a', { openDesigner: true });
+            }
           } else {
             loadProjectFromText(JSON.stringify(row.payload));
           }
@@ -6641,10 +6766,12 @@
       nextRows.forEach(row => {
         wall.appendChild(buildFeedCard(row, () => {
           if (row.mode === 'disc-design') {
-            const target = state.appMode === 'designer'
-              ? ('a')
-              : (state._discImportTargetSlot || 'top');
-            importDiscDesignFromPayload(row.payload, target, { openDesigner: state.appMode === 'designer' });
+            const slotTarget = state._discImportTargetSlot;
+            if (slotTarget) {
+              importDiscDesignFromPayload(row.payload, slotTarget, { openDesigner: false });
+            } else {
+              importDiscDesignFromPayload(row.payload, 'a', { openDesigner: true });
+            }
           } else {
             loadProjectFromText(JSON.stringify(row.payload));
           }
@@ -6688,10 +6815,10 @@
         if (trustFilter === 'trusted') rows = rows.filter(r => r.trust === 'self' || r.trust === 'trusted');
         else if (trustFilter === 'extended') rows = rows.filter(r => r.trust === 'self' || r.trust === 'trusted' || r.trust === 'extended');
         if (tab === 'New') {
-          rows.sort((a, b) => (TIER_WEIGHT[a.trust] - TIER_WEIGHT[b.trust]) || (b.createdAt - a.createdAt));
+          rows.sort((a, b) => (Number(isPreviewBroken(a)) - Number(isPreviewBroken(b))) || (TIER_WEIGHT[a.trust] - TIER_WEIGHT[b.trust]) || (b.createdAt - a.createdAt));
         } else {
           rows = deduplicateRows(rows);
-          rows.sort((a, b) => (b.reactions - a.reactions) || (TIER_WEIGHT[a.trust] - TIER_WEIGHT[b.trust]) || (b.createdAt - a.createdAt));
+          rows.sort((a, b) => (Number(isPreviewBroken(a)) - Number(isPreviewBroken(b))) || (b.reactions - a.reactions) || (TIER_WEIGHT[a.trust] - TIER_WEIGHT[b.trust]) || (b.createdAt - a.createdAt));
         }
         updateFeedStatus(tab, rows.length);
         if (!rows.length) {
@@ -7020,6 +7147,8 @@
         renderDiscPreviewDOM(content, p);
       } else if (mode === 'disc') {
         renderDiscSheetPreviewDOM(content, p);
+      } else if (mode === 'jewel') {
+        renderJewelPreviewDOM(content, p);
       } else {
         renderTemplatePreviewDOM(content, p);
       }
@@ -7517,6 +7646,132 @@
       container.appendChild(sheet);
     }
 
+    function renderJewelPreviewDOM(container, payload) {
+      const template = payload.jewelTemplate || {};
+      const inserts = template.inserts || payload.jewelInserts || {};
+      const spineLabels = template.spineLabels || payload.jewelSpineLabels || {};
+      const cfg = template.config || jewelTemplate;
+      const sheetW = Number(cfg.sheetW) || jewelTemplate.sheetW;
+      const sheetH = Number(cfg.sheetH) || jewelTemplate.sheetH;
+      const slots = Array.isArray(cfg.slots) && cfg.slots.length ? cfg.slots : jewelTemplate.slots;
+      const allLayers = Array.isArray(payload.layers) ? payload.layers : [];
+
+      const renderArt = (wrap, art) => {
+        if (!art?.src) return;
+        const img = document.createElement('img');
+        img.src = art.src;
+        img.alt = '';
+        img.style.cssText = 'position:absolute;left:50%;top:50%;transform-origin:center center;user-select:none;pointer-events:none;display:block;z-index:1;';
+        wrap.appendChild(img);
+        const update = () => {
+          const cW = wrap.clientWidth;
+          const cH = wrap.clientHeight;
+          if (!cW || !cH) return;
+          const fit = art.fit || 'cover';
+          const nW = img.naturalWidth || cW;
+          const nH = img.naturalHeight || cH;
+          let baseW = cW, baseH = cH;
+          if (fit === 'fill') { baseW = cW; baseH = cH; }
+          else if (fit === 'none') { baseW = nW; baseH = nH; }
+          else {
+            const fitScale = fit === 'contain' ? Math.min(cW / nW, cH / nH) : Math.max(cW / nW, cH / nH);
+            baseW = nW * fitScale; baseH = nH * fitScale;
+          }
+          const rotate = Number(art.rotate) || 0;
+          const zoom = Number(art.zoom) || 1;
+          const rad = rotate * Math.PI / 180;
+          const ac = Math.abs(Math.cos(rad));
+          const as = Math.abs(Math.sin(rad));
+          const rotatedW = (baseW * ac) + (baseH * as);
+          const rotatedH = (baseW * as) + (baseH * ac);
+          const coverScale = fit === 'cover'
+            ? Math.max(cW / Math.max(rotatedW, 1), cH / Math.max(rotatedH, 1), 1)
+            : 1;
+          const finalScale = coverScale * zoom;
+          const panRangeX = Math.max(0, (rotatedW * finalScale - cW) / 2);
+          const panRangeY = Math.max(0, (rotatedH * finalScale - cH) / 2);
+          const xPx = ((Number(art.x) || 0) / 100) * panRangeX;
+          const yPx = ((Number(art.y) || 0) / 100) * panRangeY;
+          img.style.width = `${baseW}px`;
+          img.style.height = `${baseH}px`;
+          img.style.transform = `translate(-50%, -50%) translate(${xPx}px, ${yPx}px) rotate(${rotate}deg) scale(${finalScale})`;
+        };
+        if (img.complete) requestAnimationFrame(update);
+        img.addEventListener('load', update, { once: true });
+        window.addEventListener('resize', update, { once: true });
+      };
+
+      const renderLayer = (wrap, layer, slotW, slotH) => {
+        const el = document.createElement('div');
+        const lx = (Number(layer.x) || 0) / slotW * 100;
+        const ly = (Number(layer.y) || 0) / slotH * 100;
+        const lw = (Number(layer.w) || slotW) / slotW * 100;
+        const lh = (Number(layer.h) || slotH) / slotH * 100;
+        el.style.cssText = `position:absolute;left:${lx}%;top:${ly}%;width:${lw}%;height:${lh}%;transform:rotate(${Number(layer.rotate)||0}deg);opacity:${layer.opacity !== undefined ? layer.opacity : 1};overflow:hidden;pointer-events:none;box-sizing:border-box;z-index:3;`;
+        if (layer.type === 'text') {
+          const scale = wrap.clientWidth ? (wrap.clientWidth / (slotW * 96)) : 1;
+          const align = layer.align || 'left';
+          el.style.cssText += `color:${layer.color || '#111'};font-size:${((layer.fontSize || 14) * (96 / 72) * scale)}px;font-weight:${layer.bold ? '800' : '400'};font-style:${layer.italic ? 'italic' : 'normal'};text-align:${align};display:flex;align-items:flex-start;justify-content:${align === 'center' ? 'center' : align === 'right' ? 'flex-end' : 'flex-start'};`;
+          el.innerHTML = layer.html || '';
+        } else if (layer.type === 'image' && layer.src) {
+          const img = document.createElement('img');
+          img.src = layer.src;
+          img.alt = layer.name || '';
+          img.style.cssText = `width:100%;height:100%;object-fit:${layer.fit || 'contain'};`;
+          el.appendChild(img);
+        }
+        wrap.appendChild(el);
+      };
+
+      const sheet = document.createElement('div');
+      sheet.style.cssText = `position:relative;width:min(100%, 720px);aspect-ratio:${sheetW} / ${sheetH};margin:0 auto;background:#fff;border:1px solid var(--line);overflow:hidden;box-shadow:0 2px 10px rgba(15,23,42,.12);`;
+
+      slots.forEach((slotDef) => {
+        const insert = inserts[slotDef.key] || {};
+        const wrap = document.createElement('div');
+        wrap.style.cssText = `position:absolute;left:${(slotDef.x / sheetW) * 100}%;top:${(slotDef.y / sheetH) * 100}%;width:${(slotDef.w / sheetW) * 100}%;height:${(slotDef.h / sheetH) * 100}%;overflow:hidden;background:${insert.src ? '#111' : '#f8fafc'};border:1px solid rgba(17,24,39,.18);box-sizing:border-box;`;
+        renderArt(wrap, insert);
+        const slotTag = `jewel-${slotDef.key}`;
+        const slotLayers = (Array.isArray(insert.layers) && insert.layers.length ? insert.layers : allLayers.filter(l => l.target === slotTag))
+          .slice().sort((a, b) => (a.z || 0) - (b.z || 0));
+        slotLayers.forEach(layer => renderLayer(wrap, layer, slotDef.w, slotDef.h));
+
+        if (slotDef.key === 'tray') {
+          const spineW = slotDef.spineW || 0.25;
+          const spineWPct = (spineW / slotDef.w) * 100;
+          const buildSpine = (side, text) => {
+            const spine = document.createElement('div');
+            spine.style.cssText = `position:absolute;top:0;bottom:0;${side}:0;width:${spineWPct}%;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:4;`;
+            const guide = document.createElement('div');
+            guide.style.cssText = `position:absolute;top:0;bottom:0;${side === 'left' ? 'right' : 'left'}:0;width:0;border-${side === 'left' ? 'right' : 'left'}:1px dashed rgba(37,99,235,.65);`;
+            spine.appendChild(guide);
+            if (text) {
+              const span = document.createElement('span');
+              span.textContent = text;
+              span.style.cssText = `writing-mode:vertical-rl;transform:rotate(180deg);font-size:7pt;font-weight:700;color:${insert.src ? 'rgba(255,255,255,.92)' : 'rgba(15,23,42,.82)'};letter-spacing:.04em;white-space:nowrap;max-height:90%;overflow:hidden;`;
+              spine.appendChild(span);
+            }
+            wrap.appendChild(spine);
+          };
+          buildSpine('left', spineLabels.left || '');
+          buildSpine('right', spineLabels.right || '');
+        }
+
+        const label = document.createElement('div');
+        label.style.cssText = `position:absolute;left:50%;bottom:-1.25rem;transform:translateX(-50%);font-size:.72rem;font-weight:700;color:#64748b;white-space:nowrap;`;
+        label.textContent = slotDef.label || slotDef.key;
+        wrap.appendChild(label);
+        sheet.appendChild(wrap);
+      });
+
+      const sheetLabel = document.createElement('div');
+      sheetLabel.style.cssText = `position:absolute;left:0;right:0;top:8px;text-align:center;font-size:.72rem;font-weight:700;color:#94a3b8;pointer-events:none;z-index:3;`;
+      sheetLabel.textContent = 'Jewel case (front + tray with spines)';
+      sheet.appendChild(sheetLabel);
+
+      container.appendChild(sheet);
+    }
+
     async function runNostrSearch() {
       const q = $('nostrQuery').value.trim();
       const type = $('nostrType').value;
@@ -7531,10 +7786,12 @@
       rows.slice(0, 40).forEach(row => {
         out.appendChild(buildResultCard(row, () => {
           if (row.mode === 'disc-design') {
-            const target = state.appMode === 'designer'
-              ? ('a')
-              : (state._discImportTargetSlot || 'top');
-            importDiscDesignFromPayload(row.payload, target, { openDesigner: state.appMode === 'designer' });
+            const slotTarget = state._discImportTargetSlot;
+            if (slotTarget) {
+              importDiscDesignFromPayload(row.payload, slotTarget, { openDesigner: false });
+            } else {
+              importDiscDesignFromPayload(row.payload, 'a', { openDesigner: true });
+            }
           } else {
             loadProjectFromText(JSON.stringify(row.payload));
           }
@@ -7675,8 +7932,20 @@
       const select = $('layerTarget');
       if (!select) return;
       if (state.appMode === 'designer') {
+        select.innerHTML = `<option value="designer-disc">Current disc design</option>`;
+        return;
+      }
+      if (state.templateMode === 'disc') {
         select.innerHTML = `
-          <option value="designer-disc">Current disc design</option>
+          <option value="page">Whole page</option>
+          <option value="disc-top">Disc 1</option>
+          <option value="disc-bottom">Disc 2</option>
+        `;
+      } else if (state.templateMode === 'jewel') {
+        select.innerHTML = `
+          <option value="page">Whole page</option>
+          <option value="jewel-front">Jewel front insert</option>
+          <option value="jewel-tray">Jewel tray insert</option>
         `;
       } else {
         select.innerHTML = `
@@ -7685,8 +7954,6 @@
           <option value="back">Back cover</option>
           <option value="spine">Spine</option>
           <option value="front">Front cover</option>
-          <option value="jewel-front">Jewel front insert</option>
-          <option value="jewel-tray">Jewel tray insert</option>
         `;
       }
     }
@@ -7717,23 +7984,85 @@
       localStorage.setItem('casewrap-welcomed', '1');
     }
 
+    let _welcomeTab = 'New';
+
+    function renderWelcomeRows(rows) {
+      const out = $('welcomeResults');
+      if (!out) return;
+      out.innerHTML = '';
+      if (!rows.length) {
+        out.innerHTML = '<div class="hint" style="grid-column:1/-1">No templates found yet. Start from scratch below or browse all designs.</div>';
+        return;
+      }
+      rows.slice(0, 24).forEach(row => {
+        const card = buildFeedCard(row, () => {
+          if (row.mode === 'disc-design') {
+            importDiscDesignFromPayload(row.payload, 'a', { openDesigner: true });
+          } else {
+            loadProjectFromText(JSON.stringify(row.payload));
+          }
+          dismissWelcomeModal();
+        });
+        out.appendChild(card);
+      });
+    }
+
+    async function loadWelcomeTab(tab) {
+      _welcomeTab = tab;
+      ['New', 'Popular', 'Search'].forEach(t => {
+        const btn = $(`welcomeTab${t}`);
+        if (btn) btn.classList.toggle('active', t === tab);
+      });
+      $('welcomeTabSearch').style.display = tab === 'Search' ? '' : 'none';
+      const out = $('welcomeResults');
+      if (!_feedCache.events && !_feedCache.loading) {
+        out.innerHTML = '<div class="hint" style="grid-column:1/-1">Loading community designs…</div>';
+      }
+      const type = $('welcomeType').value;
+      const category = $('welcomeCategory').value;
+      const rerender = () => {
+        let rows = buildRowsFromEvents(_feedCache.events || [], type, '', false, category);
+        if (tab === 'Popular') {
+          rows = deduplicateRows(rows);
+          rows.sort((a, b) => (Number(isPreviewBroken(a)) - Number(isPreviewBroken(b))) || (b.reactions - a.reactions) || (TIER_WEIGHT[a.trust] - TIER_WEIGHT[b.trust]) || (b.createdAt - a.createdAt));
+        } else {
+          rows.sort((a, b) => (Number(isPreviewBroken(a)) - Number(isPreviewBroken(b))) || (TIER_WEIGHT[a.trust] - TIER_WEIGHT[b.trust]) || (b.createdAt - a.createdAt));
+        }
+        renderWelcomeRows(rows);
+      };
+      _currentFeedRerender = rerender;
+      if (_feedCache.events && _feedCache.events.length) rerender();
+      await fetchFeedAndReactions();
+      if (_currentFeedRerender === rerender) rerender();
+    }
+
     async function runWelcomeSearch() {
       const q = $('welcomeQuery').value.trim();
       const type = $('welcomeType').value;
       const category = $('welcomeCategory').value;
-      const out = $('welcomeResults');
-      out.innerHTML = '<div class="hint">Searching relays…</div>';
-      await fetchFeedAndReactions();
-      let rows = buildRowsFromEvents(_feedCache.events || [], type, q, false, category);
-      if (q) rows = deduplicateRows(rows);
-      rows.sort((a, b) => b.reactions - a.reactions);
-      out.innerHTML = rows.length ? '' : '<div class="hint">No templates found. Start from scratch below.</div>';
-      rows.slice(0, 40).forEach(row => {
-        out.appendChild(buildResultCard(row, () => {
-          loadProjectFromText(JSON.stringify(row.payload));
-          dismissWelcomeModal();
-        }));
+      _welcomeTab = 'Search';
+      ['New', 'Popular', 'Search'].forEach(t => {
+        const btn = $(`welcomeTab${t}`);
+        if (btn) btn.classList.toggle('active', t === 'Search');
       });
+      $('welcomeTabSearch').style.display = '';
+      const out = $('welcomeResults');
+      out.innerHTML = '<div class="hint" style="grid-column:1/-1">Searching relays…</div>';
+      const rerender = () => {
+        let rows = buildRowsFromEvents(_feedCache.events || [], type, q, false, category);
+        if (q) rows = deduplicateRows(rows);
+        rows.sort((a, b) => (Number(isPreviewBroken(a)) - Number(isPreviewBroken(b))) || (b.reactions - a.reactions));
+        renderWelcomeRows(rows);
+      };
+      _currentFeedRerender = rerender;
+      await fetchFeedAndReactions();
+      if (_currentFeedRerender === rerender) rerender();
+    }
+
+    function openWelcomeBrowseAll() {
+      dismissWelcomeModal();
+      $('nostrModal').classList.add('open');
+      if (typeof switchModalTab === 'function') switchModalTab(_welcomeTab === 'Popular' ? 'Popular' : 'New');
     }
 
     function attachEvents() {
@@ -7773,11 +8102,11 @@
         });
       }
 
-      $("titleField").addEventListener("input", (e)=>{state.meta.title=e.target.value; render();});
+      $("titleField").addEventListener("input", (e)=>{state.meta.title=e.target.value; if (state.discDesign) state.discDesign.name = e.target.value; render();});
       $("imdbField").addEventListener("input", (e)=>{state.meta.imdbId=e.target.value; render();});
       $("categoryField").addEventListener("change", (e)=>{state.meta.category=e.target.value; render();});
       $("languageField").addEventListener("change", (e)=>{state.meta.language=e.target.value; render();});
-      $("designerTitleField").addEventListener("input", (e)=>{state.meta.title=e.target.value; render();});
+      $("designerTitleField").addEventListener("input", (e)=>{state.meta.title=e.target.value; if (state.discDesign) state.discDesign.name = e.target.value; render();});
       $("designerImdbField").addEventListener("input", (e)=>{state.meta.imdbId=e.target.value; render();});
       $("designerCategoryField").addEventListener("change", (e)=>{state.meta.category=e.target.value; render();});
       $("designerLanguageField").addEventListener("change", (e)=>{state.meta.language=e.target.value; render();});
@@ -7955,12 +8284,6 @@
       $('modeTabDesigner').addEventListener('click', () => switchAppMode('designer'));
 
       // Disc designer: image/position controls
-      $('designerName').addEventListener('input', (e) => {
-        state.discDesign.name = e.target.value;
-        buildDiscImportUI();
-        render();
-      });
-
       $('designerLoadBtn').addEventListener('click', () => {
         const raw = $('designerUrl').value.trim();
         if (!raw) return;
@@ -8007,6 +8330,16 @@
         state.discSpineLabels = { ...state.discSpineLabels, bottom: e.target.value };
         render();
       });
+      const jslEl = $('jewelSpineTextLeft');
+      if (jslEl) jslEl.addEventListener('input', e => {
+        state.jewelSpineLabels = { ...state.jewelSpineLabels, left: e.target.value };
+        render();
+      });
+      const jsrEl = $('jewelSpineTextRight');
+      if (jsrEl) jsrEl.addEventListener('input', e => {
+        state.jewelSpineLabels = { ...state.jewelSpineLabels, right: e.target.value };
+        render();
+      });
 
       $('designerPublishBtn').addEventListener('click', async () => {
         if (!state.community.myPubkey) {
@@ -8044,6 +8377,12 @@
       });
       $('welcomeSearchBtn').addEventListener('click', runWelcomeSearch);
       $('welcomeSkipBtn').addEventListener('click', dismissWelcomeModal);
+      $('welcomeBrowseAllBtn').addEventListener('click', openWelcomeBrowseAll);
+      $('welcomeTabNew').addEventListener('click', () => loadWelcomeTab('New'));
+      $('welcomeTabPopular').addEventListener('click', () => loadWelcomeTab('Popular'));
+      $('welcomeQuery').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); runWelcomeSearch(); } });
+      $('welcomeType').addEventListener('change', () => { if (_welcomeTab !== 'Search') loadWelcomeTab(_welcomeTab); });
+      $('welcomeCategory').addEventListener('change', () => { if (_welcomeTab !== 'Search') loadWelcomeTab(_welcomeTab); });
       $('loadProjectBtn').addEventListener('click', () => $('projectFile').click());
       $('projectFile').addEventListener('change', (event) => {
         const file = event.target.files && event.target.files[0];
@@ -8310,6 +8649,7 @@
       populateCategorySelects();
       if (!localStorage.getItem('casewrap-welcomed')) {
         $('welcomeModal').classList.add('open');
+        setTimeout(() => loadWelcomeTab('New'), 0);
       }
       buildSlotControls();
       buildDiscControls();
