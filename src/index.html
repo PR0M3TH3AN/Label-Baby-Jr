@@ -2357,6 +2357,11 @@
         <input id="relayList" type="text" placeholder="wss://relay.damus.io, wss://nos.lol, wss://relay.primal.net, wss://relay.snort.social, wss://relay.nostr.band, wss://relay.nos.social" style="margin-top:4px" />
         <p class="hint">Separate multiple relays with commas. Changing relays clears the template cache.</p>
       </details>
+      <details id="blockListDetails" style="margin-top:12px;border-top:1px solid var(--line);padding-top:10px">
+        <summary style="font-weight:700;font-size:.82rem;cursor:pointer;color:var(--muted)">Blocked authors <span id="blockCountBadge">0</span></summary>
+        <p class="hint">Blocked authors are hidden in all community feed views.</p>
+        <div id="blockListContainer" class="hint">No blocked authors yet.</div>
+      </details>
     </div>
   </div>
 
@@ -2480,6 +2485,8 @@
       'wss://relay.nostr.pub'
     ];
     const RELAY_HEALTH_CACHE_KEY = 'casewrap-relay-health';
+    const BLOCK_LIST_STORAGE_KEY = 'casewrap:block:list:v1';
+    const BLOCK_META_STORAGE_KEY = 'casewrap:block:meta:v1';
     const RELAY_FAILURE_COOLDOWN_MS = 10 * 60 * 1000;
     const RELAY_FAILURE_MAX_COOLDOWN_MS = 60 * 60 * 1000;
     const RELAY_HEALTH_MAX_AGE_MS = 24 * 60 * 60 * 1000;
@@ -5682,6 +5689,115 @@
     }
 
     const _feedState = { filterNew: 'any', filterPopular: 'any', filterMine: 'any', categoryNew: '', categoryPopular: '', categoryMine: '', languageNew: '', languagePopular: '', languageMine: '' };
+    const _blockedAuthors = new Set();
+    let _lastBlockedPubkey = '';
+
+    function normalizePubkey(value) {
+      const pubkey = String(value || '').trim().toLowerCase();
+      return /^[0-9a-f]{64}$/.test(pubkey) ? pubkey : '';
+    }
+
+    function loadBlockedAuthors() {
+      _blockedAuthors.clear();
+      try {
+        const raw = localStorage.getItem(BLOCK_LIST_STORAGE_KEY);
+        const parsed = raw ? JSON.parse(raw) : [];
+        if (Array.isArray(parsed)) {
+          for (const item of parsed) {
+            const pubkey = normalizePubkey(item);
+            if (pubkey) _blockedAuthors.add(pubkey);
+          }
+        }
+      } catch {
+        // Ignore malformed local storage.
+      }
+      return _blockedAuthors;
+    }
+
+    function saveBlockedAuthors() {
+      localStorage.setItem(BLOCK_LIST_STORAGE_KEY, JSON.stringify([..._blockedAuthors]));
+    }
+
+    function saveBlockMeta(pubkey, source = 'manual') {
+      try {
+        const raw = localStorage.getItem(BLOCK_META_STORAGE_KEY);
+        const current = raw ? JSON.parse(raw) : {};
+        current[pubkey] = { createdAt: Date.now(), source };
+        localStorage.setItem(BLOCK_META_STORAGE_KEY, JSON.stringify(current));
+      } catch {
+        // Ignore storage failures.
+      }
+    }
+
+    function removeBlockMeta(pubkey) {
+      try {
+        const raw = localStorage.getItem(BLOCK_META_STORAGE_KEY);
+        const current = raw ? JSON.parse(raw) : {};
+        delete current[pubkey];
+        localStorage.setItem(BLOCK_META_STORAGE_KEY, JSON.stringify(current));
+      } catch {
+        // Ignore storage failures.
+      }
+    }
+
+    function renderBlockedAuthors() {
+      const container = $('blockListContainer');
+      const badge = $('blockCountBadge');
+      if (!container || !badge) return;
+      badge.textContent = String(_blockedAuthors.size);
+      if (!_blockedAuthors.size) {
+        container.innerHTML = 'No blocked authors yet.';
+        return;
+      }
+      container.innerHTML = '';
+      [..._blockedAuthors].sort().forEach((pubkey) => {
+        const row = document.createElement('div');
+        row.style.display = 'flex';
+        row.style.justifyContent = 'space-between';
+        row.style.alignItems = 'center';
+        row.style.gap = '8px';
+        row.style.margin = '6px 0';
+        const name = _feedCache.profiles?.[pubkey]?.name || _feedCache.profiles?.[pubkey]?.display_name || shortPubkey(pubkey);
+        row.innerHTML = `<code style="font-size:.72rem">${escapeHtml(name)}</code>`;
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = 'Unblock';
+        btn.addEventListener('click', async () => {
+          _blockedAuthors.delete(pubkey);
+          removeBlockMeta(pubkey);
+          saveBlockedAuthors();
+          renderBlockedAuthors();
+          await refreshCommunityView();
+        });
+        row.appendChild(btn);
+        container.appendChild(row);
+      });
+    }
+
+    async function refreshCommunityView() {
+      const tab = _nostrBrowseTab || 'New';
+      if (tab === 'Mine') return loadMyDesigns();
+      return loadFeedTab(tab);
+    }
+
+    async function blockAuthor(pubkey, source = 'card') {
+      const normalized = normalizePubkey(pubkey);
+      if (!normalized) return;
+      _blockedAuthors.add(normalized);
+      _lastBlockedPubkey = normalized;
+      saveBlockedAuthors();
+      saveBlockMeta(normalized, source);
+      renderBlockedAuthors();
+      await refreshCommunityView();
+      const undo = confirm('Author blocked. Click OK to undo.');
+      if (undo && _lastBlockedPubkey === normalized) {
+        _blockedAuthors.delete(normalized);
+        removeBlockMeta(normalized);
+        saveBlockedAuthors();
+        renderBlockedAuthors();
+        await refreshCommunityView();
+      }
+    }
     const _feedPagination = {
       New: { rows: [], rendered: 0, chunk: 24, initialized: false },
       Popular: { rows: [], rendered: 0, chunk: 24, initialized: false }
@@ -5719,6 +5835,8 @@
       const latestByAddress = new Map();
       for (const e of ordered) {
         if (e.kind === 5) continue;
+        const authorPubkey = normalizePubkey(e.pubkey);
+        if (authorPubkey && _blockedAuthors.has(authorPubkey)) continue;
         let payload = null;
         try { payload = JSON.parse(e.content || '{}'); } catch { continue; }
         if (!skipVersionFilter && (payload.version ?? 0) < MIN_SUPPORTED_SCHEMA_VERSION) continue;
@@ -5813,7 +5931,15 @@
       const btn = document.createElement('button');
       btn.type = 'button'; btn.textContent = 'Use';
       btn.addEventListener('click', e => { e.stopPropagation(); onUse(); });
-      actions.append(makeReactionBtn(row), prevBtn, btn);
+      const blockBtn = document.createElement('button');
+      blockBtn.type = 'button';
+      blockBtn.textContent = 'Block';
+      blockBtn.title = 'Block this author';
+      blockBtn.addEventListener('click', async e => {
+        e.stopPropagation();
+        await blockAuthor(row.e?.pubkey, 'card');
+      });
+      actions.append(makeReactionBtn(row), prevBtn, btn, blockBtn);
       el.append(thumb, meta, actions);
       el.addEventListener('click', () => openDesignPreview(row));
       return el;
@@ -5993,7 +6119,7 @@
       }
       wall.innerHTML = '';
       if (!rows.length) {
-        wall.innerHTML = '<div class="hint" style="grid-column:1/-1">No templates found on these relays yet.</div>';
+        wall.innerHTML = `<div class="hint" style="grid-column:1/-1">No templates found on these relays yet${_blockedAuthors.size ? ' (some authors may be blocked)' : ''}.</div>`;
         return;
       }
       _feedPagination[tab].rows = rows;
@@ -6230,7 +6356,9 @@
           state.appMode = 'template';
           state.templateMode = 'disc';
           syncInputs();
-          render();
+    loadBlockedAuthors();
+    renderBlockedAuthors();
+    render();
           closeNostrPreview();
           $('nostrModal').classList.remove('open');
         });
