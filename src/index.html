@@ -1439,9 +1439,12 @@
     }
 
     
-    .modal { position: fixed; inset: 0; background: rgba(0,0,0,.6); display:none; z-index:1000; }
+    .modal { position: fixed; inset: 0; background: rgba(0,0,0,.6); display:none; align-items:center; justify-content:center; z-index:1000; }
     .modal.open { display:block; }
     .modalCard { width:min(900px,92vw); max-height:88vh; overflow:auto; margin:4vh auto; background:var(--panel); color:var(--ink); border:1px solid var(--line); border-radius:8px; padding:14px; }
+    .modalInner { width:92vw; max-height:88vh; overflow:auto; background:var(--panel); color:var(--ink); border:1px solid var(--line); border-radius:8px; padding:18px 20px; box-shadow:0 12px 36px rgba(0,0,0,.45); font-family:inherit; }
+    .modalInner h2 { font-family:inherit; }
+    .modalInner label, .modalInner p, .modalInner .hint { font-family:inherit; }
     .searchGrid{display:grid;grid-template-columns:1fr 140px 110px;gap:8px;align-items:end}
     .results{display:grid;gap:8px;margin-top:10px}
     .resultItem{display:grid;grid-template-columns:auto 1fr auto;gap:10px;align-items:center;border:1px solid var(--line);border-radius:8px;padding:8px;background:rgba(127,127,127,.07)}
@@ -1585,7 +1588,7 @@
         overflow: hidden !important;
       }
 
-      aside, .topbar, .printHelp, .nostrWidget {
+      aside, .topbar, .printHelp, .nostrWidget, .modal {
         display: none !important;
       }
 
@@ -1668,6 +1671,29 @@
         height: var(--sheet-h) !important;
         transform: translate(-50%, -50%) !important;
         margin: 0 !important;
+      }
+
+      /* "Export print" mode: isolate the sheet inside #exportPrintContainer
+         so it renders at exact artwork dimensions with no surrounding chrome */
+      html:has(body.export-print),
+      body.export-print {
+        margin: 0 !important;
+        padding: 0 !important;
+        width: auto !important;
+        height: auto !important;
+        overflow: visible !important;
+      }
+      body.export-print > *:not(#exportPrintContainer) {
+        display: none !important;
+      }
+      #exportPrintContainer {
+        position: absolute !important;
+        top: 0 !important;
+        left: 0 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        overflow: hidden !important;
+        background: #ffffff !important;
       }
 
       .slot, .discSlot, .jewelSlot {
@@ -2540,6 +2566,31 @@
         <button type="button" id="reportCancelBtn">Cancel</button>
       </div>
       <p class="hint" id="reportStatus" style="margin-top:10px;min-height:1.2em"></p>
+    </div>
+  </div>
+
+  <div class="modal" id="pdfJpegModal" aria-hidden="true" style="display:none">
+    <div class="modalInner" style="max-width:480px">
+      <h2 style="font-size:1.05rem;margin:0 0 8px;font-family:inherit">Export as JPEG</h2>
+      <p class="hint" style="margin:0 0 14px">A flattened image of your design with all artwork intact — same rendering as the PDF.</p>
+
+      <div style="margin:0 0 14px;padding-bottom:12px;border-bottom:1px solid var(--line)">
+        <div style="font-weight:700;font-size:.85rem;margin:0 0 6px">1. Save your design as a PDF</div>
+        <p class="hint" style="margin:0 0 8px">Click below to open the print dialog. Choose <b>Save as PDF</b> as the destination and save the file somewhere you'll remember.</p>
+        <button type="button" id="pdfJpegPrintBtn" class="primary">Open print dialog</button>
+      </div>
+
+      <div style="margin:0 0 12px">
+        <div style="font-weight:700;font-size:.85rem;margin:0 0 6px">2. Pick that PDF here</div>
+        <p class="hint" style="margin:0 0 8px">Select the file you just saved. The first page is flattened to a JPEG and downloaded.</p>
+        <input type="file" id="pdfJpegInput" accept="application/pdf,.pdf" style="display:block;width:100%;font-size:.82rem" />
+      </div>
+
+      <p class="hint" id="pdfJpegStatus" style="min-height:1.4em;margin:0 0 10px"></p>
+
+      <div class="buttonRow" style="margin:0;justify-content:flex-end">
+        <button type="button" id="pdfJpegCancelBtn">Close</button>
+      </div>
     </div>
   </div>
 
@@ -5949,18 +6000,319 @@
       URL.revokeObjectURL(url);
     }
 
-    let _html2canvasPromise = null;
-    function loadHtml2Canvas() {
-      if (window.html2canvas) return Promise.resolve(window.html2canvas);
-      if (_html2canvasPromise) return _html2canvasPromise;
-      _html2canvasPromise = new Promise((resolve, reject) => {
-        const s = document.createElement('script');
-        s.src = 'https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js';
-        s.onload = () => resolve(window.html2canvas);
-        s.onerror = () => { _html2canvasPromise = null; reject(new Error('Could not load the image-export library. Check your network connection.')); };
-        document.head.appendChild(s);
+    // Optional CORS proxy. Public proxies (corsproxy.io, allorigins, cors-anywhere)
+    // are currently 403/dead. Leave empty unless you host your own proxy.
+    const EXPORT_CORS_PROXY = '';
+
+    function loadImageWithCors(url, timeoutMs = 12000) {
+      return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.referrerPolicy = 'no-referrer';
+        const timer = setTimeout(() => { img.src = ''; reject(new Error('timeout')); }, timeoutMs);
+        img.onload = () => { clearTimeout(timer); resolve(img); };
+        img.onerror = () => { clearTimeout(timer); reject(new Error('load failed')); };
+        img.src = url;
       });
-      return _html2canvasPromise;
+    }
+
+    async function loadExportImage(src) {
+      if (!src) throw new Error('no src');
+      // data: and blob: URLs are already same-origin readable.
+      if (/^(data|blob):/i.test(src)) return loadImageWithCors(src);
+      try {
+        return await loadImageWithCors(src);
+      } catch (err) {
+        if (EXPORT_CORS_PROXY) {
+          return loadImageWithCors(EXPORT_CORS_PROXY + encodeURIComponent(src));
+        }
+        throw err;
+      }
+    }
+
+    const _exportFailedImages = new Set();
+
+    function setupExportCanvas(canvas, widthIn, heightIn, dpi) {
+      canvas.width = Math.round(widthIn * dpi);
+      canvas.height = Math.round(heightIn * dpi);
+      const ctx = canvas.getContext('2d');
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      return ctx;
+    }
+
+    async function drawArtworkRect(ctx, art, dx, dy, dw, dh) {
+      if (!art?.src) return;
+      let img;
+      try { img = await loadExportImage(art.src); }
+      catch { _exportFailedImages.add(art.src); return; }
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(dx, dy, dw, dh);
+      ctx.clip();
+      const fit = art.fit || 'cover';
+      const nW = img.naturalWidth || dw;
+      const nH = img.naturalHeight || dh;
+      let baseW = dw, baseH = dh;
+      if (fit === 'fill') { baseW = dw; baseH = dh; }
+      else if (fit === 'none') { baseW = nW; baseH = nH; }
+      else {
+        const s = fit === 'contain' ? Math.min(dw / nW, dh / nH) : Math.max(dw / nW, dh / nH);
+        baseW = nW * s; baseH = nH * s;
+      }
+      const rotateRad = (Number(art.rotate) || 0) * Math.PI / 180;
+      const zoom = Number(art.zoom) || 1;
+      const ac = Math.abs(Math.cos(rotateRad));
+      const as = Math.abs(Math.sin(rotateRad));
+      const rW = baseW * ac + baseH * as;
+      const rH = baseW * as + baseH * ac;
+      const coverScale = fit === 'cover' ? Math.max(dw / Math.max(rW, 1), dh / Math.max(rH, 1), 1) : 1;
+      const finalScale = coverScale * zoom;
+      const panRangeX = Math.max(0, (rW * finalScale - dw) / 2);
+      const panRangeY = Math.max(0, (rH * finalScale - dh) / 2);
+      const xPx = ((Number(art.x) || 0) / 100) * panRangeX;
+      const yPx = ((Number(art.y) || 0) / 100) * panRangeY;
+      ctx.translate(dx + dw / 2 + xPx, dy + dh / 2 + yPx);
+      ctx.rotate(rotateRad);
+      ctx.scale(finalScale, finalScale);
+      ctx.drawImage(img, -baseW / 2, -baseH / 2, baseW, baseH);
+      ctx.restore();
+    }
+
+    function drawTextLayerToCanvas(ctx, layer, w, h, dpi) {
+      const text = layerHtmlToPlainText(layer.html);
+      if (!text) return;
+      const fontPx = (Number(layer.fontSize) || 14) * (dpi / 72);
+      const padding = 0.04 * dpi;
+      const innerW = Math.max(0, w - padding * 2);
+      const innerH = Math.max(0, h - padding * 2);
+      const weight = layer.bold ? '800' : '400';
+      const style = layer.italic ? 'italic' : 'normal';
+      const family = layer.fontFamily && layer.fontFamily !== 'inherit' ? layer.fontFamily : 'sans-serif';
+      ctx.font = `${style} ${weight} ${fontPx}px ${family}`;
+      ctx.fillStyle = layer.color || '#111827';
+      ctx.textBaseline = 'top';
+      const align = layer.align === 'center' ? 'center' : layer.align === 'right' ? 'right' : 'left';
+      ctx.textAlign = align;
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(-innerW / 2, -innerH / 2, innerW, innerH);
+      ctx.clip();
+      const lines = text.split('\n');
+      const lineHeight = fontPx * 1.2;
+      const halfLeading = (lineHeight - fontPx) / 2;
+      const startX = align === 'center' ? 0 : align === 'right' ? innerW / 2 : -innerW / 2;
+      let yPos = -innerH / 2 + halfLeading;
+      for (const line of lines) {
+        ctx.fillText(line, startX, yPos);
+        yPos += lineHeight;
+      }
+      ctx.restore();
+    }
+
+    async function drawLayerToCanvas(ctx, layer, dpi, offsetX = 0, offsetY = 0) {
+      const x = offsetX + (Number(layer.x) || 0) * dpi;
+      const y = offsetY + (Number(layer.y) || 0) * dpi;
+      const w = (Number(layer.w) || 0) * dpi;
+      const h = (Number(layer.h) || 0) * dpi;
+      if (w <= 0 || h <= 0) return;
+      ctx.save();
+      ctx.globalAlpha = layer.opacity != null ? layer.opacity : 1;
+      ctx.translate(x + w / 2, y + h / 2);
+      if (layer.rotate) ctx.rotate((Number(layer.rotate) || 0) * Math.PI / 180);
+      if (layer.type === 'color') {
+        ctx.fillStyle = layer.color || COLOR_LAYER_DEFAULT_FILL;
+        ctx.fillRect(-w / 2, -h / 2, w, h);
+      } else if (layer.type === 'image' && layer.src) {
+        try {
+          const img = await loadExportImage(layer.src);
+          const fit = layer.fit || 'contain';
+          const nW = img.naturalWidth || w;
+          const nH = img.naturalHeight || h;
+          let dW = w, dH = h;
+          if (fit === 'contain') {
+            const s = Math.min(w / nW, h / nH);
+            dW = nW * s; dH = nH * s;
+          } else if (fit === 'cover') {
+            const s = Math.max(w / nW, h / nH);
+            dW = nW * s; dH = nH * s;
+          }
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(-w / 2, -h / 2, w, h);
+          ctx.clip();
+          ctx.drawImage(img, -dW / 2, -dH / 2, dW, dH);
+          ctx.restore();
+        } catch {
+          _exportFailedImages.add(layer.src);
+        }
+      } else if (layer.type === 'text') {
+        drawTextLayerToCanvas(ctx, layer, w, h, dpi);
+      }
+      ctx.restore();
+    }
+
+    async function renderCoverToExportCanvas(dpi) {
+      const panelW = state.panelW;
+      const trimH = state.trimH;
+      const spineW = state.spineW;
+      const bleed = state.bleed;
+      const totalW = panelW * 2 + spineW;
+      const sheetWidthIn = totalW + bleed * 2;
+      const sheetHeightIn = trimH + bleed * 2;
+      const canvas = document.createElement('canvas');
+      const ctx = setupExportCanvas(canvas, sheetWidthIn, sheetHeightIn, dpi);
+      if (state.artworkMode === 'combined' && state.combined?.src) {
+        if (state.combined.area === 'page') {
+          await drawArtworkRect(ctx, state.combined, 0, 0, canvas.width, canvas.height);
+        } else {
+          await drawArtworkRect(ctx, state.combined, bleed * dpi, bleed * dpi, totalW * dpi, trimH * dpi);
+        }
+      } else {
+        const slotY = bleed * dpi;
+        const slotH = trimH * dpi;
+        if (state.slots?.back?.src) await drawArtworkRect(ctx, state.slots.back, bleed * dpi, slotY, panelW * dpi, slotH);
+        if (state.slots?.spine?.src) await drawArtworkRect(ctx, state.slots.spine, (bleed + panelW) * dpi, slotY, spineW * dpi, slotH);
+        if (state.slots?.front?.src) await drawArtworkRect(ctx, state.slots.front, (bleed + panelW + spineW) * dpi, slotY, panelW * dpi, slotH);
+      }
+      const layers = (state.layers || [])
+        .filter(l => {
+          const t = String(l.target || '');
+          return !t.startsWith('disc') && !t.startsWith('jewel') && !t.startsWith('designer-') && !l._generatedDiscLayer;
+        })
+        .slice()
+        .sort((a, b) => (a.z || 0) - (b.z || 0));
+      for (const layer of layers) await drawLayerToCanvas(ctx, layer, dpi);
+      return canvas;
+    }
+
+    async function renderDiscSheetToExportCanvas(dpi) {
+      const sheetW = discTemplate.sheetW;
+      const sheetH = discTemplate.sheetH;
+      const discD = discTemplate.discD;
+      const holeD = discTemplate.holeD;
+      const canvas = document.createElement('canvas');
+      const ctx = setupExportCanvas(canvas, sheetW, sheetH, dpi);
+      for (const slotDef of discTemplate.slots) {
+        const disc = state.discs?.[slotDef.key] || {};
+        const cx = slotDef.centerX * dpi;
+        const cy = slotDef.centerY * dpi;
+        const r = (discD / 2) * dpi;
+        const slotLeft = (slotDef.centerX - discD / 2) * dpi;
+        const slotTop = (slotDef.centerY - discD / 2) * dpi;
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, 0, Math.PI * 2);
+        ctx.clip();
+        if (disc?.src) await drawArtworkRect(ctx, disc, slotLeft, slotTop, discD * dpi, discD * dpi);
+        const tag = slotDef.key === 'top' ? 'disc-top' : 'disc-bottom';
+        const slotLayers = (state.layers || [])
+          .filter(l => l.target === tag)
+          .slice()
+          .sort((a, b) => (a.z || 0) - (b.z || 0));
+        for (const layer of slotLayers) await drawLayerToCanvas(ctx, layer, dpi);
+        ctx.restore();
+        ctx.save();
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.arc(cx, cy, (holeD / 2) * dpi, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+      const spineLabels = state.discSpineLabels || {};
+      if ((spineLabels.top || spineLabels.bottom) && Array.isArray(discTemplate.spineStrips)) {
+        for (let i = 0; i < discTemplate.spineStrips.length; i++) {
+          const strip = discTemplate.spineStrips[i];
+          const text = (i < 2 ? spineLabels.top : spineLabels.bottom) || '';
+          if (!text) continue;
+          const sx = strip.x * dpi, sy = strip.y * dpi, sw = strip.w * dpi, sh = strip.h * dpi;
+          ctx.save();
+          ctx.translate(sx + sw / 2, sy + sh / 2);
+          ctx.rotate(-Math.PI / 2);
+          const fontPx = 6 * dpi / 72;
+          ctx.font = `700 ${fontPx}px sans-serif`;
+          ctx.fillStyle = 'rgba(15,23,42,.82)';
+          ctx.textBaseline = 'middle';
+          ctx.textAlign = 'center';
+          ctx.fillText(text, 0, 0);
+          ctx.restore();
+        }
+      }
+      return canvas;
+    }
+
+    async function renderJewelSheetToExportCanvas(dpi) {
+      const sheetW = jewelTemplate.sheetW;
+      const sheetH = jewelTemplate.sheetH;
+      const canvas = document.createElement('canvas');
+      const ctx = setupExportCanvas(canvas, sheetW, sheetH, dpi);
+      for (const slotDef of jewelTemplate.slots) {
+        const insert = state.jewelInserts?.[slotDef.key] || {};
+        const sx = slotDef.x * dpi, sy = slotDef.y * dpi;
+        const sw = slotDef.w * dpi, sh = slotDef.h * dpi;
+        if (insert?.src) await drawArtworkRect(ctx, insert, sx, sy, sw, sh);
+        const slotTag = `jewel-${slotDef.key}`;
+        const slotLayers = (state.layers || [])
+          .filter(l => l.target === slotTag)
+          .slice()
+          .sort((a, b) => (a.z || 0) - (b.z || 0));
+        for (const layer of slotLayers) await drawLayerToCanvas(ctx, layer, dpi);
+        if (slotDef.key === 'tray') {
+          const labels = state.jewelSpineLabels || {};
+          const spineWidthPx = (slotDef.spineW || 0.25) * dpi;
+          const drawSpine = (side, text) => {
+            if (!text) return;
+            const spineX = side === 'left' ? sx : sx + sw - spineWidthPx;
+            const cx_ = spineX + spineWidthPx / 2;
+            const cy_ = sy + sh / 2;
+            ctx.save();
+            ctx.translate(cx_, cy_);
+            ctx.rotate(-Math.PI / 2);
+            const fontPx = 7 * dpi / 72;
+            ctx.font = `700 ${fontPx}px sans-serif`;
+            ctx.fillStyle = insert?.src ? 'rgba(255,255,255,.92)' : 'rgba(15,23,42,.82)';
+            ctx.textBaseline = 'middle';
+            ctx.textAlign = 'center';
+            ctx.fillText(text, 0, 0);
+            ctx.restore();
+          };
+          drawSpine('left', labels.left || '');
+          drawSpine('right', labels.right || '');
+        }
+      }
+      return canvas;
+    }
+
+    async function renderDiscDesignToExportCanvas(dpi) {
+      const disc = state.discDesign || {};
+      const discD = discTemplate.discD;
+      const holeD = discTemplate.holeD;
+      const canvas = document.createElement('canvas');
+      const ctx = setupExportCanvas(canvas, discD, discD, dpi);
+      const r = (discD / 2) * dpi;
+      const cx = r, cy = r;
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.clip();
+      ctx.fillStyle = '#111827';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      if (disc?.src) await drawArtworkRect(ctx, disc, 0, 0, canvas.width, canvas.height);
+      const layers = (state.layers || [])
+        .filter(l => l.target === 'designer-disc' && !l._generatedDiscLayer)
+        .slice()
+        .sort((a, b) => (a.z || 0) - (b.z || 0));
+      for (const layer of layers) await drawLayerToCanvas(ctx, layer, dpi);
+      ctx.restore();
+      ctx.save();
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(cx, cy, (holeD / 2) * dpi, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+      return canvas;
     }
 
     function jpegFilenameStem() {
@@ -5972,57 +6324,71 @@
       return parts.join('_');
     }
 
-    async function exportArtboardAsJpeg(button) {
-      const originalLabel = button?.textContent;
-      const originalSelectedId = state.selectedLayerId;
-      const sheetWrapEl = $('sheetWrap');
-      const originalSheetWrapTransform = sheetWrapEl?.style.transform || '';
-      const targetEl = state.appMode === 'designer' ? $('designerDiscWrap') : $('sheet');
-      if (!targetEl) return;
-      try {
-        if (button) { button.disabled = true; button.textContent = 'Rendering…'; }
-        if (originalSelectedId) { state.selectedLayerId = ''; }
-        if (sheetWrapEl) sheetWrapEl.style.transform = 'none';
-        document.body.classList.add('exporting');
-        render();
-        await new Promise(res => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(res, 100))));
-        await Promise.all([...targetEl.querySelectorAll('img')].map(img => {
-          if (img.complete && img.naturalHeight) return Promise.resolve();
-          return new Promise(res => {
-            img.addEventListener('load', () => res(), { once: true });
-            img.addEventListener('error', () => res(), { once: true });
-          });
-        }));
-        const html2canvas = await loadHtml2Canvas();
-        const rect = targetEl.getBoundingClientRect();
-        const scale = Math.max(2, Math.min(4, 1800 / Math.max(rect.width, rect.height)));
-        const canvas = await html2canvas(targetEl, {
-          scale,
-          useCORS: true,
-          allowTaint: false,
-          backgroundColor: '#ffffff',
-          logging: false,
-          imageTimeout: 10000
-        });
-        const blob = await new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.92));
-        if (!blob) throw new Error('Could not encode JPEG. One of your images is from a server that blocks cross-origin reads — try a different image host.');
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `${jpegFilenameStem()}.jpg`;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
-      } catch (err) {
-        alert(err.message || 'Could not export JPEG.');
-      } finally {
-        document.body.classList.remove('exporting');
-        if (sheetWrapEl) sheetWrapEl.style.transform = originalSheetWrapTransform;
-        if (originalSelectedId) { state.selectedLayerId = originalSelectedId; }
-        render();
-        if (button) { button.disabled = false; button.textContent = originalLabel; }
-      }
+    const PDFJS_VERSION = '3.11.174';
+    const PDFJS_BASE = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${PDFJS_VERSION}`;
+    let _pdfJsPromise = null;
+    function loadPdfJs() {
+      if (window.pdfjsLib) return Promise.resolve(window.pdfjsLib);
+      if (_pdfJsPromise) return _pdfJsPromise;
+      _pdfJsPromise = new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        script.src = `${PDFJS_BASE}/pdf.min.js`;
+        script.onload = () => {
+          if (window.pdfjsLib) {
+            window.pdfjsLib.GlobalWorkerOptions.workerSrc = `${PDFJS_BASE}/pdf.worker.min.js`;
+            resolve(window.pdfjsLib);
+          } else {
+            _pdfJsPromise = null;
+            reject(new Error('PDF.js loaded but its API was not exposed.'));
+          }
+        };
+        script.onerror = () => { _pdfJsPromise = null; reject(new Error('Could not load PDF.js from the CDN. Check your network connection.')); };
+        document.head.appendChild(script);
+      });
+      return _pdfJsPromise;
+    }
+
+    async function convertPdfFileToJpegBlob(file) {
+      const arrayBuffer = await file.arrayBuffer();
+      const pdfjsLib = await loadPdfJs();
+      const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+      const page = await pdf.getPage(1);
+      const baseViewport = page.getViewport({ scale: 1 });
+      const targetLongestEdge = 2400;
+      const scale = Math.max(1.5, targetLongestEdge / Math.max(baseViewport.width, baseViewport.height));
+      const viewport = page.getViewport({ scale });
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(viewport.width);
+      canvas.height = Math.round(viewport.height);
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      await page.render({ canvasContext: ctx, viewport }).promise;
+      const blob = await new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.92));
+      if (!blob) throw new Error('Could not encode JPEG from the rendered PDF page.');
+      return blob;
+    }
+
+    function openPdfJpegModal() {
+      const m = $('pdfJpegModal');
+      if (!m) return;
+      m.style.display = 'flex';
+      m.setAttribute('aria-hidden', 'false');
+      const status = $('pdfJpegStatus');
+      if (status) { status.textContent = ''; status.style.color = ''; }
+      const input = $('pdfJpegInput');
+      if (input) input.value = '';
+    }
+
+    function closePdfJpegModal() {
+      const m = $('pdfJpegModal');
+      if (!m) return;
+      m.style.display = 'none';
+      m.setAttribute('aria-hidden', 'true');
+    }
+
+    function exportArtboardAsJpeg() {
+      openPdfJpegModal();
     }
 
     function downloadProject() {
@@ -8550,6 +8916,107 @@
       if (exportJpegBtn) exportJpegBtn.addEventListener('click', () => exportArtboardAsJpeg(exportJpegBtn));
       const designerExportJpegBtn = $('designerExportJpegBtn');
       if (designerExportJpegBtn) designerExportJpegBtn.addEventListener('click', () => exportArtboardAsJpeg(designerExportJpegBtn));
+
+      let _exportSheetOrigParent = null;
+      let _exportSheetOrigNext = null;
+      let _exportSheetOrigStyle = null;
+
+      function enterExportPrintMode() {
+        if ($('exportPrintContainer')) exitExportPrintMode();
+        const sheet = $('sheet');
+        if (!sheet || state.appMode === 'designer') return false;
+        let pageWIn, pageHIn, offsetX = 0, offsetY = 0;
+        if (state.templateMode === 'cover') {
+          pageWIn = state.panelW * 2 + state.spineW; // trim area, no bleed
+          pageHIn = state.trimH;
+          offsetX = -state.bleed;
+          offsetY = -state.bleed;
+        } else {
+          pageWIn = sheetW();
+          pageHIn = sheetH();
+        }
+        _exportSheetOrigParent = sheet.parentNode;
+        _exportSheetOrigNext = sheet.nextSibling;
+        _exportSheetOrigStyle = sheet.getAttribute('style') || '';
+        const container = document.createElement('div');
+        container.id = 'exportPrintContainer';
+        container.style.cssText = `width:${fmt(pageWIn)}in;height:${fmt(pageHIn)}in;`;
+        document.body.appendChild(container);
+        container.appendChild(sheet);
+        sheet.style.cssText = `position:absolute!important;top:${fmt(offsetY)}in!important;left:${fmt(offsetX)}in!important;width:${fmt(sheetW())}in!important;height:${fmt(sheetH())}in!important;margin:0!important;padding:0!important;transform:none!important;box-shadow:none!important;`;
+        document.body.classList.add('export-print');
+        $('dynamicPageStyle').textContent = `@page { size: ${fmt(pageWIn)}in ${fmt(pageHIn)}in; margin: 0; }`;
+        return true;
+      }
+
+      function exitExportPrintMode() {
+        const container = $('exportPrintContainer');
+        if (!container) return;
+        const sheet = $('sheet');
+        if (sheet && _exportSheetOrigParent) {
+          if (_exportSheetOrigStyle) sheet.setAttribute('style', _exportSheetOrigStyle);
+          else sheet.removeAttribute('style');
+          if (_exportSheetOrigNext && _exportSheetOrigNext.parentNode === _exportSheetOrigParent) {
+            _exportSheetOrigParent.insertBefore(sheet, _exportSheetOrigNext);
+          } else {
+            _exportSheetOrigParent.appendChild(sheet);
+          }
+        }
+        container.remove();
+        document.body.classList.remove('export-print');
+        _exportSheetOrigParent = null;
+        _exportSheetOrigNext = null;
+        _exportSheetOrigStyle = null;
+        const pageW = state.templateMode === 'cover' ? 11 : sheetW();
+        const pageH = state.templateMode === 'cover' ? 8.5 : sheetH();
+        $('dynamicPageStyle').textContent = `@page { size: ${fmt(pageW)}in ${fmt(pageH)}in; margin: 0; }`;
+      }
+
+      let _pdfJpegPrevTitle = null;
+      const pdfJpegPrintBtn = $('pdfJpegPrintBtn');
+      if (pdfJpegPrintBtn) pdfJpegPrintBtn.addEventListener('click', () => {
+        const status = $('pdfJpegStatus');
+        if (status) { status.style.color = ''; status.textContent = 'Print dialog opening — choose Save as PDF.'; }
+        enterExportPrintMode();
+        _pdfJpegPrevTitle = document.title;
+        document.title = `${currentPdfTitle()}-jpeg-source`;
+        setTimeout(() => { try { window.print(); } catch {} }, 50);
+      });
+      window.addEventListener('afterprint', () => {
+        if (document.body.classList.contains('export-print')) exitExportPrintMode();
+        if (_pdfJpegPrevTitle !== null) { document.title = _pdfJpegPrevTitle; _pdfJpegPrevTitle = null; }
+        const modal = $('pdfJpegModal');
+        if (modal && modal.getAttribute('aria-hidden') === 'false') {
+          const status = $('pdfJpegStatus');
+          if (status) status.textContent = 'PDF saved? Now pick it below to convert to JPEG.';
+        }
+      });
+      const pdfJpegInput = $('pdfJpegInput');
+      if (pdfJpegInput) pdfJpegInput.addEventListener('change', async (event) => {
+        const file = event.target.files && event.target.files[0];
+        if (!file) return;
+        const status = $('pdfJpegStatus');
+        if (status) { status.style.color = ''; status.textContent = 'Loading PDF.js and rendering the page…'; }
+        try {
+          const blob = await convertPdfFileToJpegBlob(file);
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `${jpegFilenameStem()}.jpg`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 1000);
+          if (status) { status.style.color = 'var(--ok)'; status.textContent = 'JPEG saved.'; }
+          setTimeout(closePdfJpegModal, 1200);
+        } catch (err) {
+          if (status) { status.style.color = 'var(--warn)'; status.textContent = err.message || 'Could not convert PDF.'; }
+        }
+      });
+      const pdfJpegCancelBtn = $('pdfJpegCancelBtn');
+      if (pdfJpegCancelBtn) pdfJpegCancelBtn.addEventListener('click', closePdfJpegModal);
+      const pdfJpegModalEl = $('pdfJpegModal');
+      if (pdfJpegModalEl) pdfJpegModalEl.addEventListener('click', e => { if (e.target === pdfJpegModalEl) closePdfJpegModal(); });
       $('designerSaveProjectBtn').addEventListener('click', () => {
         try {
           downloadSingleDesign();
