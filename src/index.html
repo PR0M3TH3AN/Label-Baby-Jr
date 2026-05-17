@@ -823,7 +823,27 @@
 
     /* Export toggles: fold/safe/trim/bleed/crops only apply to case covers */
     body.template-disc .cover-toggle,
-    body.template-jewel .cover-toggle {
+    body.template-jewel .cover-toggle,
+    body.template-customart .cover-toggle {
+      display: none !important;
+    }
+
+    /* Custom Art mode: hide all the slot/region UI and decorations, show only the canvas + layers */
+    body:not(.template-customart) #customArtFieldset {
+      display: none !important;
+    }
+    body.template-customart #coverSizeFieldset,
+    body.template-customart #coverArtworkFieldset,
+    body.template-customart #discArtworkFieldset,
+    body.template-customart #jewelArtworkFieldset,
+    body.template-customart .coverOnly,
+    body.template-customart .diskLayer,
+    body.template-customart .jewelLayer,
+    body.template-customart .bleedFill,
+    body.template-customart .trimArea,
+    body.template-customart .foldLine,
+    body.template-customart .discSpineStrip,
+    body.template-customart .jewelSpineGuide {
       display: none !important;
     }
 
@@ -1840,6 +1860,7 @@
         <div class="layoutTabs" role="tablist" aria-label="Template layout">
           <button type="button" class="layoutTab" id="mode-cover" data-template-mode="cover" role="tab">Case cover</button>
           <button type="button" class="layoutTab" id="mode-disc" data-template-mode="disc" role="tab">Disc labels</button>
+          <button type="button" class="layoutTab" id="mode-customart" data-template-mode="customart" role="tab">Custom art</button>
         </div>
       </fieldset>
 
@@ -1980,6 +2001,25 @@
           </div>
           <p class="hint">Publishing requires a Nostr browser extension (Alby, nos2x).</p>
         </details>
+      </fieldset>
+
+      <fieldset class="workflowStep template-only" id="customArtFieldset">
+        <legend data-step="2">Canvas</legend>
+        <label for="customArtPreset">Preset size</label>
+        <select id="customArtPreset"></select>
+        <div class="row">
+          <div>
+            <label for="customArtWidth">Width, px</label>
+            <input id="customArtWidth" type="number" min="100" max="8192" step="1" />
+          </div>
+          <div>
+            <label for="customArtHeight">Height, px</label>
+            <input id="customArtHeight" type="number" min="100" max="8192" step="1" />
+          </div>
+        </div>
+        <label for="customArtBg">Background color</label>
+        <input id="customArtBg" type="color" />
+        <p class="hint">100–8192 px. Add layers (image / text / color) using the Layers panel below.</p>
       </fieldset>
 
       <fieldset class="workflowStep template-only" id="coverArtworkFieldset">
@@ -2741,6 +2781,9 @@
         { key: 'jewel-front', label: 'Jewel front insert' },
         { key: 'jewel-tray', label: 'Jewel tray insert' }
       ];
+      if (state.templateMode === 'customart') return [
+        { key: 'canvas', label: 'Canvas' }
+      ];
       return TEMPLATE_LAYER_TARGETS;
     }
 
@@ -2770,6 +2813,28 @@
       { key: 'tray', label: 'Tray insert with spines', x: 1.29685, y: 5.9373, w: 5.9063, h: 4.6254, spineW: 0.25 }
       ]
     };
+
+    const CUSTOM_ART_MIN = 100;
+    const CUSTOM_ART_MAX = 8192;
+    const CUSTOM_ART_PRESETS = [
+      { key: '1920x1080', label: '1920 × 1080  · Desktop wallpaper (16:9)', w: 1920, h: 1080 },
+      { key: '1080x1920', label: '1080 × 1920  · Phone wallpaper (9:16)', w: 1080, h: 1920 },
+      { key: '2560x1440', label: '2560 × 1440  · QHD (16:9)', w: 2560, h: 1440 },
+      { key: '3840x2160', label: '3840 × 2160  · 4K UHD (16:9)', w: 3840, h: 2160 },
+      { key: '1080x1080', label: '1080 × 1080  · Square (1:1)', w: 1080, h: 1080 },
+      { key: '1080x1350', label: '1080 × 1350  · Portrait (4:5)', w: 1080, h: 1350 },
+      { key: '1500x500',  label: '1500 × 500   · Banner (3:1)',  w: 1500, h: 500 },
+      { key: '850x1100',  label: '850 × 1100   · US Letter portrait', w: 850, h: 1100 },
+      { key: '1100x850',  label: '1100 × 850   · US Letter landscape', w: 1100, h: 850 },
+      { key: 'custom',    label: 'Custom…', w: 0, h: 0 }
+    ];
+
+    function customArtCanvasInches(ca = state.customArt) {
+      return {
+        wIn: Math.max(CUSTOM_ART_MIN, Math.min(CUSTOM_ART_MAX, Number(ca?.width) || 1920)) / 96,
+        hIn: Math.max(CUSTOM_ART_MIN, Math.min(CUSTOM_ART_MAX, Number(ca?.height) || 1080)) / 96
+      };
+    }
 
     const discSlotNames = [
       { key: 'top', label: 'Disc 1' },
@@ -2857,6 +2922,7 @@
         bottom: { title: '', imdbId: '', category: '', language: 'en' }
       },
       discDesign: { name: '', src: '', fit: 'cover', zoom: 1, x: 0, y: 0, rotate: 0 },
+      customArt: { width: 1920, height: 1080, background: '#ffffff', preset: '1920x1080' },
       discSpineLabels: { top: '', bottom: '' },
       jewelSpineLabels: { left: '', right: '' },
       jewelInserts: {
@@ -3158,7 +3224,9 @@
       if (raw === 'disc-sheet') return 'disc';
       if (raw === 'jewel-inserts') return 'jewel';
       if (raw === 'disc-design') return 'disc-design';
+      if (raw === 'customart' || raw === 'custom-art') return 'customart';
       if (raw === 'cover' || raw === 'disc' || raw === 'jewel') return raw;
+      if (payload.customArt) return 'customart';
       if (payload.discTemplate || payload.discMeta) return 'disc';
       if (payload.discDesign && !payload.discTemplate) return 'disc-design';
       if (payload.coverTemplate || payload.slots || payload.combined) return 'cover';
@@ -3601,12 +3669,14 @@
     function sheetW() {
       if (state.templateMode === 'disc') return discTemplate.sheetW;
       if (state.templateMode === 'jewel') return jewelTemplate.sheetW;
+      if (state.templateMode === 'customart') return customArtCanvasInches().wIn;
       return totalTrimW() + state.bleed * 2;
     }
 
     function sheetH() {
       if (state.templateMode === 'disc') return discTemplate.sheetH;
       if (state.templateMode === 'jewel') return jewelTemplate.sheetH;
+      if (state.templateMode === 'customart') return customArtCanvasInches().hIn;
       return state.trimH + state.bleed * 2;
     }
 
@@ -3638,8 +3708,9 @@
     }
 
     function syncInputs() {
-      for (const mode of ['cover', 'disc']) {
+      for (const mode of ['cover', 'disc', 'customart']) {
         const button = $(`mode-${mode}`);
+        if (!button) continue;
         const active = state.templateMode === mode;
         button.classList.toggle('active', active);
         button.setAttribute('aria-selected', active ? 'true' : 'false');
@@ -3688,6 +3759,17 @@
       const stb = $('spineTextBottom'); if (stb) stb.value = state.discSpineLabels?.bottom || '';
       const jsl = $('jewelSpineTextLeft'); if (jsl) jsl.value = state.jewelSpineLabels?.left || '';
       const jsr = $('jewelSpineTextRight'); if (jsr) jsr.value = state.jewelSpineLabels?.right || '';
+      const caPresetEl = $('customArtPreset');
+      if (caPresetEl) {
+        if (!caPresetEl.options.length) {
+          caPresetEl.innerHTML = CUSTOM_ART_PRESETS.map(p =>
+            `<option value="${p.key}">${p.label}</option>`).join('');
+        }
+        caPresetEl.value = state.customArt?.preset || 'custom';
+      }
+      const caW = $('customArtWidth'); if (caW) caW.value = state.customArt?.width || 1920;
+      const caH = $('customArtHeight'); if (caH) caH.value = state.customArt?.height || 1080;
+      const caBg = $('customArtBg'); if (caBg) caBg.value = state.customArt?.background || '#ffffff';
       syncPublishReadout();
       syncModeTabsUI();
     }
@@ -3705,6 +3787,7 @@
       document.body.classList.toggle('template-cover', state.templateMode === 'cover');
       document.body.classList.toggle('template-disc', state.templateMode === 'disc');
       document.body.classList.toggle('template-jewel', state.templateMode === 'jewel');
+      document.body.classList.toggle('template-customart', state.templateMode === 'customart');
       document.body.classList.toggle('hide-guides', !state.showGuides);
       document.body.classList.toggle('hide-bleed', !state.showBleed);
       document.body.classList.toggle('hide-crops', !state.showCrops);
@@ -3739,7 +3822,19 @@
       const pageH = state.templateMode === 'cover' ? 8.5 : sheetH();
       $('dynamicPageStyle').textContent = `@page { size: ${fmt(pageW)}in ${fmt(pageH)}in; margin: 0; }`;
 
-      if (state.templateMode === 'disc') {
+      // Reset inline sheet background; customart branch sets it below.
+      $('sheet').style.background = '';
+
+      if (state.templateMode === 'customart') {
+        const ca = state.customArt || {};
+        const w = Math.max(CUSTOM_ART_MIN, Math.min(CUSTOM_ART_MAX, Number(ca.width) || 1920));
+        const h = Math.max(CUSTOM_ART_MIN, Math.min(CUSTOM_ART_MAX, Number(ca.height) || 1080));
+        $('projectTitle').textContent = 'Custom art canvas';
+        document.querySelector('.printHelp').textContent = `${w} × ${h} px canvas. Export as JPEG for sharing.`;
+        $('trimReadout').textContent = `${w} × ${h} px`;
+        $('sheetReadout').textContent = `(${fmt(w/96)} × ${fmt(h/96)} in)`;
+        $('sheet').style.background = ca.background || '#ffffff';
+      } else if (state.templateMode === 'disc') {
         $('projectTitle').textContent = 'Disc label preview';
         document.querySelector('.printHelp').textContent = 'Avery 8960 / 8944 layout: two full-face disc labels on Letter paper.';
         $('trimReadout').textContent = `Disc: ${fmt(discTemplate.discD)} in diameter`;
@@ -4615,6 +4710,10 @@
       switch (target) {
         case 'designer-disc':
           return { x: 0, y: 0, w: discTemplate.discD, h: discTemplate.discD };
+        case 'canvas': {
+          const { wIn, hIn } = customArtCanvasInches();
+          return { x: 0, y: 0, w: wIn, h: hIn };
+        }
         case 'cover-trim':
           return { x: state.bleed, y: state.bleed, w: totalTrimW(), h: state.trimH };
         case 'back':
@@ -4642,7 +4741,9 @@
         syncModeTabsUI();
         return;
       }
-      if (target.startsWith('disc')) {
+      if (target === 'canvas') {
+        state.templateMode = 'customart';
+      } else if (target.startsWith('disc')) {
         state.templateMode = 'disc';
       } else if (target.startsWith('jewel')) {
         state.templateMode = 'jewel';
@@ -5968,6 +6069,18 @@
       };
     }
 
+    function customArtPayload() {
+      return {
+        version: SCHEMA_VERSION,
+        templateMode: 'customart',
+        templateType: 'customart',
+        meta: state.meta,
+        ui: { zoom: state.zoom, showGuides: state.showGuides },
+        customArt: { ...state.customArt },
+        layers: nonGeneratedLayers().filter(l => l.target === 'canvas')
+      };
+    }
+
     function exportPayload() {
       const templateType = templateTypeForMode();
       return {
@@ -5990,6 +6103,7 @@
         ...(state.templateMode === 'disc-design' ? { discDesign: state.discDesign } : {}),
         discTemplate: { templateType: templateTypeForMode('disc'), config: discTemplate, discs: state.discs, spineLabels: state.discSpineLabels, meta: state.discMeta },
         jewelTemplate: { templateType: templateTypeForMode('jewel'), preset: 'jewel8693', config: jewelTemplate, inserts: state.jewelInserts, spineLabels: state.jewelSpineLabels },
+        customArt: { ...state.customArt },
         layers: nonGeneratedLayers(),
         community: { relays: state.community.relays, query: state.community.query, kind: state.community.kind }
       };
@@ -6486,6 +6600,9 @@
         triggerDownload(discSheetPayload(), discProjectFilename());
       } else if (state.templateMode === 'jewel') {
         triggerDownload(jewelTemplatePayload(), projectFilename('cd_jewel_case', 'jewel8693'));
+      } else if (state.templateMode === 'customart') {
+        const ca = state.customArt || { width: 1920, height: 1080 };
+        triggerDownload(customArtPayload(), projectFilename('custom_art', `${ca.width}x${ca.height}`));
       } else {
         triggerDownload(coverTemplatePayload(), projectFilename('case_cover', state.preset));
       }
@@ -6661,6 +6778,23 @@
         });
         normalizeJewelState();
         syncInputs(); syncAllJewelInputs(); render();
+        return;
+      }
+
+      if (mode === 'customart' || parsed.customArt) {
+        Object.assign(state, {
+          templateMode: 'customart',
+          meta: { ...state.meta, ...(parsed.meta || {}) },
+          zoom: parsed.ui?.zoom ?? state.zoom,
+          showGuides: parsed.ui?.showGuides ?? state.showGuides,
+          customArt: { ...state.customArt, ...(parsed.customArt || {}) },
+          layers: [
+            ...state.layers.filter(l => l.target !== 'canvas'),
+            ...(Array.isArray(parsed.layers) ? parsed.layers : [])
+          ],
+          selectedLayerId: ''
+        });
+        syncInputs(); render();
         return;
       }
 
@@ -8961,6 +9095,8 @@
           <option value="jewel-front">Jewel front insert</option>
           <option value="jewel-tray">Jewel tray insert</option>
         `;
+      } else if (state.templateMode === 'customart') {
+        select.innerHTML = `<option value="canvas">Canvas</option>`;
       } else {
         select.innerHTML = `
           <option value="page">Whole page</option>
@@ -9080,8 +9216,10 @@
     }
 
     function attachEvents() {
-      for (const mode of ['cover', 'disc']) {
-        $(`mode-${mode}`).addEventListener('click', () => {
+      for (const mode of ['cover', 'disc', 'customart']) {
+        const btn = $(`mode-${mode}`);
+        if (!btn) continue;
+        btn.addEventListener('click', () => {
           state.templateMode = mode;
           if (mode === 'jewel') {
             state.preset = 'jewel8693';
@@ -9095,6 +9233,39 @@
       }
 
       $('preset').addEventListener('change', (event) => applyPreset(event.target.value));
+
+      const caPresetEl = $('customArtPreset');
+      if (caPresetEl) caPresetEl.addEventListener('change', (e) => {
+        const key = e.target.value;
+        const preset = CUSTOM_ART_PRESETS.find(p => p.key === key);
+        state.customArt = state.customArt || { width: 1920, height: 1080, background: '#ffffff', preset: '1920x1080' };
+        state.customArt.preset = key;
+        if (preset && preset.key !== 'custom') {
+          state.customArt.width = preset.w;
+          state.customArt.height = preset.h;
+        }
+        syncInputs();
+        render();
+      });
+      const setCustomArtSize = () => {
+        const w = Number($('customArtWidth')?.value) || state.customArt.width;
+        const h = Number($('customArtHeight')?.value) || state.customArt.height;
+        state.customArt = state.customArt || {};
+        state.customArt.width = Math.max(CUSTOM_ART_MIN, Math.min(CUSTOM_ART_MAX, w));
+        state.customArt.height = Math.max(CUSTOM_ART_MIN, Math.min(CUSTOM_ART_MAX, h));
+        // Snap-detect: if size matches a preset, select it; else mark "custom".
+        const matched = CUSTOM_ART_PRESETS.find(p => p.key !== 'custom' && p.w === state.customArt.width && p.h === state.customArt.height);
+        state.customArt.preset = matched ? matched.key : 'custom';
+        render();
+      };
+      const caW = $('customArtWidth');  if (caW) caW.addEventListener('input', setCustomArtSize);
+      const caH = $('customArtHeight'); if (caH) caH.addEventListener('input', setCustomArtSize);
+      const caBg = $('customArtBg');
+      if (caBg) caBg.addEventListener('input', (e) => {
+        state.customArt = state.customArt || {};
+        state.customArt.background = e.target.value;
+        render();
+      });
 
       for (const id of ['panelW', 'trimH', 'spineW', 'bleed', 'safe']) {
         $(id).addEventListener('input', () => {
