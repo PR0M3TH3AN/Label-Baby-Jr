@@ -2476,7 +2476,7 @@
       <p class="subhead" style="margin:0 0 14px">Browse community templates or start your own.</p>
       <div class="welcomeSearchRow">
         <div><label for="welcomeQuery" style="font-size:.78rem">Title or IMDb ID</label><input id="welcomeQuery" type="text" placeholder="e.g. The Matrix or tt0133093" /></div>
-        <div><label for="welcomeType" style="font-size:.78rem">Type</label><select id="welcomeType"><option value="any">Any type</option><option value="cover">Case cover</option><option value="disc">Disc labels</option><option value="jewel">CD jewel inserts</option><option value="disc-design">Disc designs</option></select></div>
+        <div><label for="welcomeType" style="font-size:.78rem">Type</label><select id="welcomeType"><option value="any">Any type</option><option value="cover">Case cover</option><option value="disc">Disc labels</option><option value="jewel">CD jewel inserts</option><option value="disc-design">Disc designs</option><option value="customart">Custom art</option></select></div>
         <div><label for="welcomeCategory" style="font-size:.78rem">Category</label><select id="welcomeCategory" class="categorySelect"></select></div>
         <div class="buttonRow" style="margin:0"><button type="button" id="welcomeSearchBtn" class="primary">Search</button></div>
       </div>
@@ -2527,6 +2527,7 @@
           <button class="feedTypeBtn" data-tab="New" data-type="disc">Disc Sheets</button>
           <button class="feedTypeBtn" data-tab="New" data-type="jewel">Jewel Inserts</button>
           <button class="feedTypeBtn" data-tab="New" data-type="disc-design">Disc Designs</button>
+          <button class="feedTypeBtn" data-tab="New" data-type="customart">Custom Art</button>
           <select id="feedCategoryNew" class="feedCategorySelect categorySelect" data-tab="New" aria-label="Category filter"></select>
           <select id="feedLanguageNew" class="feedCategorySelect feedLanguageSelect" data-tab="New" aria-label="Language filter">
             <option value="">Any language</option>
@@ -2560,6 +2561,7 @@
           <button class="feedTypeBtn" data-tab="Popular" data-type="disc">Disc Sheets</button>
           <button class="feedTypeBtn" data-tab="Popular" data-type="jewel">Jewel Inserts</button>
           <button class="feedTypeBtn" data-tab="Popular" data-type="disc-design">Disc Designs</button>
+          <button class="feedTypeBtn" data-tab="Popular" data-type="customart">Custom Art</button>
           <select id="feedCategoryPopular" class="feedCategorySelect categorySelect" data-tab="Popular" aria-label="Category filter"></select>
           <select id="feedLanguagePopular" class="feedCategorySelect feedLanguageSelect" data-tab="Popular" aria-label="Language filter">
             <option value="">Any language</option>
@@ -2589,7 +2591,7 @@
       <div id="panelSearch" style="display:none">
         <div class="searchGrid">
           <div><label for="nostrQuery">Title or IMDb ID</label><input id="nostrQuery" type="text" placeholder="e.g. The Matrix or tt0133093" /></div>
-          <div><label for="nostrType">Type</label><select id="nostrType"><option value="any">Any</option><option value="cover">Case cover</option><option value="disc">Disc sheet</option><option value="jewel">CD jewel inserts</option><option value="disc-design">Disc design</option></select></div>
+          <div><label for="nostrType">Type</label><select id="nostrType"><option value="any">Any</option><option value="cover">Case cover</option><option value="disc">Disc sheet</option><option value="jewel">CD jewel inserts</option><option value="disc-design">Disc design</option><option value="customart">Custom art</option></select></div>
           <div><label for="nostrCategory">Category</label><select id="nostrCategory" class="categorySelect"></select></div>
           <div class="buttonRow" style="margin:0"><button type="button" id="nostrRunSearch" class="primary">Search</button></div>
         </div>
@@ -2603,6 +2605,7 @@
           <button class="feedTypeBtn" data-tab="Mine" data-type="disc">Disc Sheets</button>
           <button class="feedTypeBtn" data-tab="Mine" data-type="jewel">Jewel Inserts</button>
           <button class="feedTypeBtn" data-tab="Mine" data-type="disc-design">Disc Designs</button>
+          <button class="feedTypeBtn" data-tab="Mine" data-type="customart">Custom Art</button>
           <select id="feedCategoryMine" class="feedCategorySelect categorySelect" data-tab="Mine" aria-label="Category filter"></select>
           <select id="feedLanguageMine" class="feedCategorySelect feedLanguageSelect" data-tab="Mine" aria-label="Language filter">
             <option value="">Any language</option>
@@ -3252,6 +3255,7 @@
     function templateTypeForMode(mode = state.templateMode) {
       if (mode === 'jewel') return 'cd-jewel-case';
       if (mode === 'disc') return 'disc-label-sheet';
+      if (mode === 'customart') return 'customart';
       const preset = state.preset === 'jewel8693' ? 'dvd' : (state.preset || 'custom');
       if (preset === 'dvd' || preset === 'bluray') return preset;
       return 'custom-case-cover';
@@ -5421,6 +5425,14 @@
         if (!previewFromPayload(payload, 'jewel')) {
           throw new Error('Load jewel insert artwork before publishing.');
         }
+      } else if (state.templateMode === 'customart') {
+        payload = customArtPayload();
+        typeTag = 'casewrap-customart';
+        const hasContent = (state.layers || []).some(l => l.target === 'canvas');
+        const hasNonWhiteBg = (state.customArt?.background || '#ffffff').toLowerCase() !== '#ffffff';
+        if (!hasContent && !hasNonWhiteBg) {
+          throw new Error('Add at least one layer or set a non-white background before publishing.');
+        }
       } else {
         payload = coverTemplatePayload();
         typeTag = 'casewrap-cover';
@@ -5429,7 +5441,9 @@
         }
       }
       const mode = normalizeTemplateMode(payload);
-      const dBase = state.meta.imdbId || state.meta.title;
+      const dBase = state.meta.imdbId
+        || state.meta.title
+        || (mode === 'customart' ? `${state.customArt?.width || 0}x${state.customArt?.height || 0}` : '');
       const tags = [
         ['d', `${mode}:${dBase}`],
         ...getTemplateTags(payload, typeTag)
@@ -7589,6 +7603,7 @@
         if (row.mode === 'disc-design') renderDiscPreviewDOM(previewWrap, payload, { compact: true });
         else if (row.mode === 'disc') renderDiscSheetPreviewDOM(previewWrap, payload, { compact: true });
         else if (row.mode === 'jewel') renderJewelPreviewDOM(previewWrap, payload, { compact: true });
+        else if (row.mode === 'customart') renderCustomArtPreviewDOM(previewWrap, payload, { compact: true });
         else renderTemplatePreviewDOM(previewWrap, payload, { compact: true });
       } catch {}
       thumb.appendChild(previewWrap);
@@ -7925,6 +7940,13 @@
           );
         }
 
+        if (mode === 'customart') {
+          // First image layer's src is used as the thumb-detection target.
+          const layers = Array.isArray(payload.layers) ? payload.layers : [];
+          const firstImage = layers.find(l => l.type === 'image' && l.src);
+          return firstImage?.src || '';
+        }
+
         // Cover: front → combined wrap → back (in that priority)
         return (
           payload.coverTemplate?.slots?.front?.src ||
@@ -8227,6 +8249,8 @@
         renderDiscSheetPreviewDOM(content, p);
       } else if (mode === 'jewel') {
         renderJewelPreviewDOM(content, p);
+      } else if (mode === 'customart') {
+        renderCustomArtPreviewDOM(content, p);
       } else {
         renderTemplatePreviewDOM(content, p);
       }
@@ -8920,6 +8944,68 @@
       container.appendChild(sheet);
     }
 
+    function renderCustomArtPreviewDOM(container, payload, opts = {}) {
+      const compact = !!opts.compact;
+      const ca = payload.customArt || {};
+      const wPx = Math.max(CUSTOM_ART_MIN, Math.min(CUSTOM_ART_MAX, Number(ca.width) || 1920));
+      const hPx = Math.max(CUSTOM_ART_MIN, Math.min(CUSTOM_ART_MAX, Number(ca.height) || 1080));
+      const wIn = wPx / 96;
+      const hIn = hPx / 96;
+      const background = ca.background || '#ffffff';
+
+      // Natural pixel size for compact mode is the same scale system as the
+      // other previews — fixed at PREVIEW_BASE_PX wide, height derived from
+      // the canvas aspect ratio. fitMiniPreview() scales the whole thing to
+      // fit the thumb.
+      const naturalW = PREVIEW_BASE_PX;
+      const naturalH = PREVIEW_BASE_PX * hIn / wIn;
+
+      const canvas = document.createElement('div');
+      canvas.style.cssText = [
+        'position:relative',
+        compact ? `width:${naturalW}px` : `width:min(100%, ${PREVIEW_BASE_PX}px)`,
+        compact ? `height:${naturalH}px` : `aspect-ratio:${wPx} / ${hPx}`,
+        compact ? 'margin:0;transform-origin:center center' : 'margin:0 auto',
+        `background:${background}`,
+        compact ? 'border:0' : 'border:1px solid var(--line)',
+        'overflow:hidden',
+        compact ? 'box-shadow:none' : 'box-shadow:0 2px 10px rgba(15,23,42,.12)'
+      ].join(';');
+
+      const layers = (Array.isArray(payload.layers) ? payload.layers : [])
+        .filter(l => l.target === 'canvas' || !l.target)
+        .slice()
+        .sort((a, b) => (a.z || 0) - (b.z || 0));
+
+      // Layer positions are stored in INCHES (relative to the canvas which
+      // is wIn × hIn). Convert to percentages.
+      layers.forEach((layer, i) => {
+        const el = document.createElement('div');
+        const lx = ((Number(layer.x) || 0) / wIn) * 100;
+        const ly = ((Number(layer.y) || 0) / hIn) * 100;
+        const lw = ((Number(layer.w) || wIn) / wIn) * 100;
+        const lh = ((Number(layer.h) || hIn) / hIn) * 100;
+        const zi = 3 + i;
+        el.style.cssText = `position:absolute;left:${lx}%;top:${ly}%;width:${lw}%;height:${lh}%;transform:rotate(${Number(layer.rotate)||0}deg);opacity:${layer.opacity !== undefined ? layer.opacity : 1};overflow:hidden;pointer-events:none;box-sizing:border-box;z-index:${zi};`;
+
+        if (layer.type === 'text') {
+          applyPreviewLayerTextStyle(el, layer, PREVIEW_BASE_PX / wIn);
+        } else if (layer.type === 'color') {
+          el.style.background = layer.color || COLOR_LAYER_DEFAULT_FILL;
+        } else if (layer.type === 'image' && layer.src) {
+          const img = document.createElement('img');
+          img.src = layer.src;
+          img.alt = layer.name || '';
+          img.style.cssText = `width:100%;height:100%;object-fit:${layer.fit || 'contain'};`;
+          img.addEventListener('error', () => img.remove());
+          el.appendChild(img);
+        }
+        canvas.appendChild(el);
+      });
+
+      container.appendChild(canvas);
+    }
+
     async function runNostrSearch() {
       const q = $('nostrQuery').value.trim();
       const type = $('nostrType').value;
@@ -9462,6 +9548,7 @@
           pageWIn = sheetW();
           pageHIn = sheetH();
         }
+        const bg = state.templateMode === 'customart' ? (state.customArt?.background || '#ffffff') : '';
         _exportSheetOrigParent = sheet.parentNode;
         _exportSheetOrigNext = sheet.nextSibling;
         _exportSheetOrigStyle = sheet.getAttribute('style') || '';
@@ -9470,7 +9557,7 @@
         container.style.cssText = `width:${fmt(pageWIn)}in;height:${fmt(pageHIn)}in;`;
         document.body.appendChild(container);
         container.appendChild(sheet);
-        sheet.style.cssText = `position:absolute!important;top:${fmt(offsetY)}in!important;left:${fmt(offsetX)}in!important;width:${fmt(sheetW())}in!important;height:${fmt(sheetH())}in!important;margin:0!important;padding:0!important;transform:none!important;box-shadow:none!important;`;
+        sheet.style.cssText = `position:absolute!important;top:${fmt(offsetY)}in!important;left:${fmt(offsetX)}in!important;width:${fmt(sheetW())}in!important;height:${fmt(sheetH())}in!important;margin:0!important;padding:0!important;transform:none!important;box-shadow:none!important;${bg ? `background:${bg}!important;` : ''}`;
         document.body.classList.add('export-print');
         $('dynamicPageStyle').textContent = `@page { size: ${fmt(pageWIn)}in ${fmt(pageHIn)}in; margin: 0; }`;
         return true;
