@@ -1533,6 +1533,40 @@
     .welcomeCard { max-width: 900px; width: min(900px, 92vw); }
     .welcomeCloseBtn { position:absolute; top:8px; right:10px; width:32px; height:32px; border:0; background:transparent; color:var(--muted); font-size:24px; line-height:1; cursor:pointer; padding:0; border-radius:6px; display:flex; align-items:center; justify-content:center; }
     .welcomeCloseBtn:hover { background:rgba(127,127,127,.15); color:var(--ink); }
+    .addIdentifiersDetails { }
+    .addIdentifiersBtn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 7px 14px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--panel);
+      color: var(--ink);
+      cursor: pointer;
+      font-size: .82rem;
+      font-weight: 600;
+      list-style: none;
+      user-select: none;
+      transition: background .12s, border-color .12s, color .12s;
+    }
+    .addIdentifiersBtn::-webkit-details-marker { display: none; }
+    .addIdentifiersBtn::marker { content: ''; }
+    .addIdentifiersBtn:hover { background: rgba(127,127,127,.12); border-color: var(--muted); }
+    .addIdentifiersDetails[open] .addIdentifiersBtn {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }
+    .identifierFields {
+      margin-top: 8px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: rgba(127,127,127,.05);
+    }
+    .identifierFields label { margin-top: 4px; font-size: .78rem; }
+    .identifierFields input { margin-bottom: 4px; }
     .welcomeSearchRow { display:grid; grid-template-columns: 1fr 160px 160px auto; gap:8px; align-items:end; margin-bottom:12px; }
     .welcomeTabs { display:flex; gap:6px; border-bottom:1px solid var(--line); margin:4px 0 10px; flex-wrap:wrap; }
     .welcomeTab { background:transparent; border:0; padding:8px 14px; cursor:pointer; font-weight:700; color:var(--muted); border-bottom:2px solid transparent; font-size:.85rem; }
@@ -1855,7 +1889,16 @@
         <details class="compactDetails">
           <summary data-step="5">Project metadata</summary>
         <label for="titleField">Title *</label><input id="titleField" type="text" placeholder="Movie title" required />
-        <label for="imdbField">IMDb ID</label><input id="imdbField" type="text" placeholder="tt1234567" />
+        <details class="addIdentifiersDetails" style="margin:10px 0">
+          <summary class="addIdentifiersBtn"><span id="identifierBtnLabel">+ Add Media Identifiers</span></summary>
+          <div class="identifierFields">
+            <label for="imdbField">IMDb ID</label><input id="imdbField" type="text" placeholder="tt1234567" />
+            <label for="upcField">UPC</label><input id="upcField" type="text" placeholder="12-digit barcode" />
+            <label for="tvdbField">TheTVDB ID</label><input id="tvdbField" type="text" placeholder="series or movie ID" />
+            <label for="musicbrainzField">MusicBrainz Disc ID</label><input id="musicbrainzField" type="text" placeholder="disc ID" />
+            <p class="hint" style="margin:6px 0 0">Optional — used for search and cross-referencing. Add whichever apply to your content type.</p>
+          </div>
+        </details>
         <label for="categoryField">Category</label>
         <select id="categoryField">
           <option value="">Uncategorized</option>
@@ -2226,8 +2269,20 @@
           <summary data-step="3">Project metadata</summary>
           <label for="designerTitleField">Title *</label>
           <input id="designerTitleField" type="text" placeholder="Movie, album, or game title" />
-          <label for="designerImdbField">IMDb ID</label>
-          <input id="designerImdbField" type="text" placeholder="tt1234567" />
+          <details class="addIdentifiersDetails" style="margin:10px 0">
+            <summary class="addIdentifiersBtn"><span id="designerIdentifierBtnLabel">+ Add Media Identifiers</span></summary>
+            <div class="identifierFields">
+              <label for="designerImdbField">IMDb ID</label>
+              <input id="designerImdbField" type="text" placeholder="tt1234567" />
+              <label for="designerUpcField">UPC</label>
+              <input id="designerUpcField" type="text" placeholder="12-digit barcode" />
+              <label for="designerTvdbField">TheTVDB ID</label>
+              <input id="designerTvdbField" type="text" placeholder="series or movie ID" />
+              <label for="designerMusicbrainzField">MusicBrainz Disc ID</label>
+              <input id="designerMusicbrainzField" type="text" placeholder="disc ID" />
+              <p class="hint" style="margin:6px 0 0">Optional. Add whichever apply.</p>
+            </div>
+          </details>
           <label for="designerCategoryField">Category *</label>
           <select id="designerCategoryField" class="categorySelect"></select>
           <label for="designerLanguageField">Language</label>
@@ -2762,7 +2817,7 @@
     const RELAY_HEALTH_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
     const state = {
-      meta: { title: "", imdbId: "", omdbApiKey: "", category: "", language: "en" },
+      meta: { title: "", imdbId: "", upc: "", tvdbId: "", musicbrainzDiscId: "", omdbApiKey: "", category: "", language: "en" },
       darkMode: false,
       appMode: 'template',
       templateMode: 'cover',
@@ -3066,12 +3121,23 @@
     function getTemplateTags(payload, typeTag) {
       const tags = [];
       const title = payload?.meta?.title || payload?.title || '';
-      const imdb = payload?.meta?.imdbId || payload?.imdbId || '';
+      const imdb = (payload?.meta?.imdbId || payload?.imdbId || '').trim();
+      const upc = (payload?.meta?.upc || '').trim();
+      const tvdb = (payload?.meta?.tvdbId || '').trim();
+      const mbDisc = (payload?.meta?.musicbrainzDiscId || '').trim();
       const category = payload?.meta?.category || payload?.category || '';
       const language = payload?.meta?.language || 'en';
       const templateType = payload?.templateType || '';
       if (title) tags.push(['title', title]);
-      if (imdb) tags.push(['i', imdb]);
+      // NIP-73 style external IDs. We also emit the legacy bare imdb 'i' tag
+      // for backward compat with older clients that filter on it.
+      if (imdb) {
+        tags.push(['i', imdb]);
+        tags.push(['i', `imdb:${imdb}`]);
+      }
+      if (upc) tags.push(['i', `upc:${upc}`]);
+      if (tvdb) tags.push(['i', `tvdb:${tvdb}`]);
+      if (mbDisc) tags.push(['i', `musicbrainz:${mbDisc}`]);
       tags.push(['t', 'casewrap']);
       if (typeTag) tags.push(['t', typeTag]);
       if (templateType) {
@@ -3592,12 +3658,25 @@
       const dm=$('darkMode'); if (dm) dm.checked = !!state.darkMode;
       $('titleField').value = state.meta?.title || "";
       $('imdbField').value = state.meta?.imdbId || "";
+      const upcEl = $('upcField'); if (upcEl) upcEl.value = state.meta?.upc || '';
+      const tvdbEl = $('tvdbField'); if (tvdbEl) tvdbEl.value = state.meta?.tvdbId || '';
+      const mbEl = $('musicbrainzField'); if (mbEl) mbEl.value = state.meta?.musicbrainzDiscId || '';
       const cf = $('categoryField'); if (cf) cf.value = state.meta?.category || '';
       const lf = $('languageField'); if (lf) lf.value = state.meta?.language || 'en';
       const dt = $('designerTitleField'); if (dt) dt.value = state.meta?.title || "";
       const di = $('designerImdbField'); if (di) di.value = state.meta?.imdbId || "";
+      const dUpc = $('designerUpcField'); if (dUpc) dUpc.value = state.meta?.upc || '';
+      const dTvdb = $('designerTvdbField'); if (dTvdb) dTvdb.value = state.meta?.tvdbId || '';
+      const dMb = $('designerMusicbrainzField'); if (dMb) dMb.value = state.meta?.musicbrainzDiscId || '';
       const dc = $('designerCategoryField'); if (dc) dc.value = state.meta?.category || '';
       const dl = $('designerLanguageField'); if (dl) dl.value = state.meta?.language || 'en';
+      // Identifier button label changes based on whether any are filled
+      const idCount = ['imdbId','upc','tvdbId','musicbrainzDiscId'].filter(k => (state.meta?.[k] || '').trim()).length;
+      const idLabel = idCount
+        ? `Media Identifiers (${idCount})`
+        : '+ Add Media Identifiers';
+      const idBtnLabel = $('identifierBtnLabel'); if (idBtnLabel) idBtnLabel.textContent = idLabel;
+      const dIdBtnLabel = $('designerIdentifierBtnLabel'); if (dIdBtnLabel) dIdBtnLabel.textContent = idLabel;
       const metadataFieldset = $('metadataFieldset');
       if (metadataFieldset) metadataFieldset.style.display = state.templateMode === 'disc' ? 'none' : '';
       if (state.templateMode === 'disc' && state.appMode !== 'designer') syncProjectMetaFromDiscMeta(true);
@@ -7310,7 +7389,10 @@
         if (categoryFilter && category !== categoryFilter) continue;
         if (languageFilter && language !== languageFilter) continue;
         if (q) {
-          const hay = `${displayTitle} ${title} ${imdb} ${category} ${language} ${(e.tags || []).map(t => t.join(' ')).join(' ')}`.toLowerCase();
+          const upcVal = payload.meta?.upc || '';
+          const tvdbVal = payload.meta?.tvdbId || '';
+          const mbVal = payload.meta?.musicbrainzDiscId || '';
+          const hay = `${displayTitle} ${title} ${imdb} ${upcVal} ${tvdbVal} ${mbVal} ${category} ${language} ${(e.tags || []).map(t => t.join(' ')).join(' ')}`.toLowerCase();
           if (!hay.includes(q)) continue;
         }
         const uiKey = address ? `${address}|${mode}` : '';
@@ -9036,10 +9118,16 @@
 
       $("titleField").addEventListener("input", (e)=>{state.meta.title=e.target.value; if (state.discDesign) state.discDesign.name = e.target.value; render();});
       $("imdbField").addEventListener("input", (e)=>{state.meta.imdbId=e.target.value; render();});
+      const upcInput = $("upcField"); if (upcInput) upcInput.addEventListener("input", (e)=>{state.meta.upc=e.target.value; render();});
+      const tvdbInput = $("tvdbField"); if (tvdbInput) tvdbInput.addEventListener("input", (e)=>{state.meta.tvdbId=e.target.value; render();});
+      const mbInput = $("musicbrainzField"); if (mbInput) mbInput.addEventListener("input", (e)=>{state.meta.musicbrainzDiscId=e.target.value; render();});
       $("categoryField").addEventListener("change", (e)=>{state.meta.category=e.target.value; render();});
       $("languageField").addEventListener("change", (e)=>{state.meta.language=e.target.value; render();});
       $("designerTitleField").addEventListener("input", (e)=>{state.meta.title=e.target.value; if (state.discDesign) state.discDesign.name = e.target.value; render();});
       $("designerImdbField").addEventListener("input", (e)=>{state.meta.imdbId=e.target.value; render();});
+      const dUpcInput = $("designerUpcField"); if (dUpcInput) dUpcInput.addEventListener("input", (e)=>{state.meta.upc=e.target.value; render();});
+      const dTvdbInput = $("designerTvdbField"); if (dTvdbInput) dTvdbInput.addEventListener("input", (e)=>{state.meta.tvdbId=e.target.value; render();});
+      const dMbInput = $("designerMusicbrainzField"); if (dMbInput) dMbInput.addEventListener("input", (e)=>{state.meta.musicbrainzDiscId=e.target.value; render();});
       $("designerCategoryField").addEventListener("change", (e)=>{state.meta.category=e.target.value; render();});
       $("designerLanguageField").addEventListener("change", (e)=>{state.meta.language=e.target.value; render();});
 
