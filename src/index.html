@@ -1584,6 +1584,21 @@
       .profileAvatar { margin-top:-44px; }
     }
 
+    .previewActionsRow { display:flex; gap:6px; align-items:center; flex-wrap:wrap; justify-content:flex-end; max-width:100%; }
+    /* The inner #nostrPreviewActions wrapper exists so the dynamic preview
+       buttons can be cleared and reinserted as a group. Using display:contents
+       flattens it for layout, so its children wrap together with Refresh /
+       Back / Close instead of forming a separate row. */
+    .previewActionsRow > #nostrPreviewActions[data-visible="true"] { display:contents; }
+    .previewActionsRow > #nostrPreviewActions[data-visible="false"] { display:none; }
+    .previewActionsRow button { font-size:.78rem; padding:5px 10px; line-height:1.2; white-space:nowrap; }
+
+    .editingBanner { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:8px 14px; background:rgba(251,191,36,.12); border-bottom:1px solid rgba(251,191,36,.4); font-size:.85rem; color:#92400e; flex-wrap:wrap; }
+    body.dark .editingBanner { background:rgba(251,191,36,.1); color:#fbbf24; }
+    .editingBannerText { flex:1; min-width:0; }
+    .editingBannerText strong { font-weight:700; }
+    #editingBannerCancel { font-size:.78rem; padding:4px 10px; flex-shrink:0; }
+
     .tipAmounts { display:grid; grid-template-columns:repeat(auto-fit,minmax(72px,1fr)); gap:8px; margin:0 0 14px; }
     .tipAmounts button { padding:10px 6px; font-size:.9rem; font-weight:600; cursor:pointer; border:1px solid var(--line); background:var(--bg); color:var(--ink); border-radius:8px; }
     .tipAmounts button.active { background:var(--accent); color:#fff; border-color:var(--accent); }
@@ -2411,6 +2426,12 @@
     </aside>
 
     <main>
+      <div id="editingBanner" class="editingBanner" style="display:none">
+        <span class="editingBannerText">
+          Editing published design: <strong id="editingBannerTitle"></strong>
+        </span>
+        <button type="button" id="editingBannerCancel">Cancel edit</button>
+      </div>
       <div class="topbar">
         <div>
           <h2 id="projectTitle">Cover preview</h2>
@@ -2546,8 +2567,8 @@
           <h2 id="nostrPreviewTitle">Design Preview</h2>
           <p id="nostrPreviewMeta" class="subhead"></p>
         </div>
-        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-          <div id="nostrPreviewActions" style="display:none;gap:8px;align-items:center;flex-wrap:wrap;">
+        <div class="previewActionsRow">
+          <div id="nostrPreviewActions" data-visible="false">
             <button type="button" id="previewSaveJsonBtn">Save JSON</button>
           </div>
           <button type="button" id="nostrRefreshBtn">Refresh</button>
@@ -3070,6 +3091,10 @@
       darkMode: false,
       appMode: 'template',
       templateMode: 'cover',
+      editingDTag: '',
+      editingKind: 0,
+      editingEventId: '',
+      editingTitle: '',
       preset: 'dvd',
       panelW: presets.dvd.panelW,
       trimH: presets.dvd.trimH,
@@ -5658,13 +5683,18 @@
       const dBase = state.meta.imdbId
         || state.meta.title
         || (mode === 'customart' ? `${state.customArt?.width || 0}x${state.customArt?.height || 0}` : '');
+      // In edit mode, reuse the original d-tag so the new event supersedes the
+      // old one on relays. Otherwise mint a fresh d-tag from current state.
+      const dTag = isEditing() ? state.editingDTag : `${mode}:${dBase}`;
       const tags = [
-        ['d', `${mode}:${dBase}`],
+        ['d', dTag],
         ...getTemplateTags(payload, typeTag)
       ];
       const evt = { kind: 30078, created_at: Math.floor(Date.now() / 1000), tags, content: JSON.stringify(payload) };
       const signed = await publishCommunityEvent(evt);
-      await finalizePublishedTemplateEvent(signed, { label: `Template "${state.meta.title}"` });
+      const label = isEditing() ? `Updated "${state.meta.title}"` : `Template "${state.meta.title}"`;
+      await finalizePublishedTemplateEvent(signed, { label });
+      if (isEditing()) exitEditMode();
       return signed;
     }
 
@@ -5679,8 +5709,9 @@
       if (!designName?.trim()) {
         throw new Error('Add a title in Project Metadata or a custom design name before publishing.');
       }
+      const dTag = isEditing() ? state.editingDTag : `disc-design:${state.meta.imdbId || designName}`;
       const tags = [
-        ['d', `disc-design:${state.meta.imdbId || designName}`],
+        ['d', dTag],
         ...getTemplateTags(payload, 'casewrap-disc-design'),
         ['title', designName]
       ];
@@ -5692,7 +5723,9 @@
         content: JSON.stringify(payload)
       };
       const signed = await publishCommunityEvent(evt);
-      await finalizePublishedTemplateEvent(signed, { label: `Disc design "${designName}"` });
+      const label = isEditing() ? `Updated "${designName}"` : `Disc design "${designName}"`;
+      await finalizePublishedTemplateEvent(signed, { label });
+      if (isEditing()) exitEditMode();
       return signed;
     }
 
@@ -6879,6 +6912,7 @@
       state.layers = (state.layers || []).filter(l => l.target !== 'designer-disc');
       state.meta = { title: '', imdbId: '', omdbApiKey: '', category: '', language: 'en' };
       state.selectedLayerId = '';
+      exitEditMode();
       syncInputs();
       syncDesignerInputs();
       render();
@@ -6908,12 +6942,110 @@
       state.meta = { title: '', imdbId: '', omdbApiKey: '', category: '', language: 'en' };
       state.layers = (state.layers || []).filter(l => l.target === 'designer-disc');
       state.selectedLayerId = '';
+      exitEditMode();
       syncInputs();
       syncAllSlotInputs();
       syncAllDiscInputs();
       syncAllJewelInputs();
       syncCombinedInputs();
       render();
+    }
+
+    // ---- Edit-mode helpers (NIP-33 replaceable-event republish) ----
+
+    function isEditing() {
+      return !!state.editingDTag;
+    }
+
+    function enterEditMode({ dTag, kind, eventId, title }) {
+      state.editingDTag = String(dTag || '');
+      state.editingKind = Number(kind) || 30078;
+      state.editingEventId = String(eventId || '');
+      state.editingTitle = String(title || '');
+      paintEditingBanner();
+    }
+
+    function exitEditMode() {
+      state.editingDTag = '';
+      state.editingKind = 0;
+      state.editingEventId = '';
+      state.editingTitle = '';
+      paintEditingBanner();
+    }
+
+    function paintEditingBanner() {
+      const el = $('editingBanner');
+      const titleEl = $('editingBannerTitle');
+      if (!el) return;
+      if (isEditing()) {
+        if (titleEl) titleEl.textContent = state.editingTitle || 'this design';
+        el.style.display = 'flex';
+      } else {
+        el.style.display = 'none';
+        if (titleEl) titleEl.textContent = '';
+      }
+      paintPublishButtonLabels();
+    }
+
+    function paintPublishButtonLabels() {
+      const editing = isEditing();
+      const tmplBtn = $('communityPublishBtn');
+      const designerBtn = $('designerPublishBtn');
+      if (tmplBtn) tmplBtn.textContent = editing ? 'Publish update' : 'Publish to Nostr';
+      if (designerBtn) designerBtn.textContent = editing ? 'Publish update' : 'Publish to Nostr';
+    }
+
+    function rowDTag(row) {
+      return (row?.e?.tags || []).find(t => t[0] === 'd' && t[1])?.[1] || '';
+    }
+
+    function rowIsOwnedByMe(row) {
+      const my = normalizePubkey(state.community?.myPubkey || '');
+      const author = normalizePubkey(row?.e?.pubkey || '');
+      return !!my && my === author;
+    }
+
+    function startEditFromRow(row) {
+      const dTag = rowDTag(row);
+      if (!dTag) { alert('This design has no d-tag and cannot be edited in place. You can fork it instead.'); return; }
+      // Close the surrounding browser/profile modal so the editor is visible.
+      const nostrModalEl = $('nostrModal');
+      if (nostrModalEl) nostrModalEl.classList.remove('open');
+      const profileModalEl = $('profileModal');
+      if (profileModalEl && profileModalEl.getAttribute('aria-hidden') === 'false') {
+        closeProfilePage({ popState: false });
+      }
+      // Load the design into the editor. Note: loadProjectFromText calls
+      // exitEditMode at the top, so we must call enterEditMode AFTER the load.
+      try {
+        if (row.mode === 'disc-design') {
+          importDiscDesignFromPayload(row.payload, 'a', { openDesigner: true });
+        } else {
+          loadProjectFromText(JSON.stringify(row.payload));
+        }
+      } catch (err) {
+        alert(`Could not load this design: ${err?.message || err}`);
+        return;
+      }
+      enterEditMode({
+        dTag,
+        kind: row.e?.kind || 30078,
+        eventId: row.e?.id || '',
+        title: row.title || state.meta?.title || 'Untitled design'
+      });
+    }
+
+    let _editConfirmShownThisSession = false;
+    function confirmEditPublish() {
+      if (_editConfirmShownThisSession) return true;
+      const ok = confirm(
+        'Publish an update to this design?\n\n' +
+        'Replaces the original on relays. Existing reactions and Lightning zaps on the old version stay on Nostr but will no longer link to this design — totals reset to zero.\n\n' +
+        'naddr share links keep working. nevent links (pinned to the old event id) will not.\n\n' +
+        'Continue?'
+      );
+      if (ok) _editConfirmShownThisSession = true;
+      return ok;
     }
 
     function closeTemplateProject() {
@@ -6936,6 +7068,9 @@
 
     function loadProjectFromText(text) {
       const parsed = JSON.parse(text);
+      // Loading a project file is always a fresh-start operation — never an
+      // in-place edit of a published event. Drop any prior editing context.
+      exitEditMode();
       if (parsed.version && parsed.templateMode === 'disc-design' && parsed.discDesign) {
         importDiscDesignFromPayload(parsed, 'a', { openDesigner: true });
         return;
@@ -9138,7 +9273,11 @@
         openReportModal(row.e?.id, row.e?.pubkey);
       });
       const tipBtn = makeFeedCardTipButton(row);
-      actions.append(makeReactionBtn(row), prevBtn, btn, blockBtn, reportBtn);
+      const editBtn = makeFeedCardEditButton(row);
+      const isMine = rowIsOwnedByMe(row);
+      actions.append(makeReactionBtn(row), prevBtn, btn);
+      if (editBtn) actions.appendChild(editBtn);
+      if (!isMine) actions.append(blockBtn, reportBtn);
       if (tipBtn) actions.appendChild(tipBtn);
       const zapMsats = zapTotalForEvent(row.e?.id || '');
       if (zapMsats > 0) {
@@ -9154,6 +9293,19 @@
         openDesignPreview(row);
       });
       return el;
+    }
+
+    function makeFeedCardEditButton(row) {
+      if (!rowIsOwnedByMe(row) || !rowDTag(row)) return null;
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = 'Edit';
+      btn.title = 'Edit this design and publish an update (replaces the original)';
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        startEditFromRow(row);
+      });
+      return btn;
     }
 
     function makeFeedCardTipButton(row) {
@@ -9721,6 +9873,17 @@
         actionsDiv.removeChild(actionsDiv.firstChild);
       }
 
+      // Owner-only Edit button — replaces the published event in place via the
+      // shared d-tag. Falls through silently for designs without a d-tag.
+      if (rowIsOwnedByMe(row) && rowDTag(row)) {
+        const editBtn = document.createElement('button');
+        editBtn.type = 'button';
+        editBtn.textContent = 'Edit';
+        editBtn.title = 'Edit this design and publish an update (replaces the original)';
+        editBtn.addEventListener('click', () => startEditFromRow(row));
+        actionsDiv.insertBefore(editBtn, saveJsonBtn);
+      }
+
       // Lightning tip button — only shown when the author has a resolvable LN address.
       const previewPk = row?.e?.pubkey;
       if (previewPk) {
@@ -9848,7 +10011,7 @@
       // Switch modal into preview mode
       $('nostrBrowseHeading').style.display = 'none';
       $('nostrPreviewHeading').style.display = '';
-      $('nostrPreviewActions').style.display = 'flex';
+      $('nostrPreviewActions').dataset.visible = 'true';
       $('nostrBackBtn').style.display = '';
       $('nostrModal').querySelector('.modalTabs').style.display = 'none';
       for (const t of ['New', 'Popular', 'Zapped', 'Search', 'Mine']) {
@@ -9875,7 +10038,7 @@
     function closeNostrPreview() {
       $('nostrBrowseHeading').style.display = '';
       $('nostrPreviewHeading').style.display = 'none';
-      $('nostrPreviewActions').style.display = 'none';
+      $('nostrPreviewActions').dataset.visible = 'false';
       $('nostrBackBtn').style.display = 'none';
       $('nostrModal').querySelector('.modalTabs').style.display = '';
       $('nostrPreviewPanel').style.display = 'none';
@@ -11150,9 +11313,11 @@
           alert('Please sign in with Nostr (top right) before publishing.');
           return;
         }
+        if (isEditing() && !confirmEditPublish()) return;
+        const wasEditing = isEditing();
         try {
           await publishCurrentTemplateToNostr();
-          alert('Published to Nostr.');
+          alert(wasEditing ? 'Design updated.' : 'Published to Nostr.');
         } catch (error) {
           alert(error.message || 'Could not publish the template.');
         }
@@ -11375,9 +11540,11 @@
           alert('Please sign in with Nostr (top right) before publishing.');
           return;
         }
+        if (isEditing() && !confirmEditPublish()) return;
+        const wasEditing = isEditing();
         try {
           await publishDiscDesignToNostr();
-          alert(`${state.discDesign.name || 'Design'} published to Nostr.`);
+          alert(wasEditing ? 'Design updated.' : `${state.discDesign.name || 'Design'} published to Nostr.`);
         } catch (error) {
           alert(error.message || 'Could not publish.');
         }
@@ -11742,6 +11909,7 @@
       on('closeProjectSaveBtn', 'click', handleCloseProjectSave);
       on('closeProjectDiscardBtn', 'click', handleCloseProjectDiscard);
       on('closeProjectCancelBtn', 'click', closeCloseProjectModal);
+      on('editingBannerCancel', 'click', () => exitEditMode());
       const closeProjectModalEl = $('closeProjectModal');
       if (closeProjectModalEl) closeProjectModalEl.addEventListener('click', e => { if (e.target === closeProjectModalEl) closeCloseProjectModal(); });
       on('profileCloseBtn', 'click', () => closeProfilePage());
@@ -11831,7 +11999,7 @@
       const previewActions = $('nostrPreviewActions');
       if (browseHeading) browseHeading.style.display = 'none';
       if (previewHeading) previewHeading.style.display = '';
-      if (previewActions) previewActions.style.display = 'flex';
+      if (previewActions) previewActions.dataset.visible = 'true';
       $('nostrPreviewTitle').textContent = 'Loading shared design…';
       $('nostrPreviewMeta').textContent = '';
       if (previewPanel) { previewPanel.style.display = ''; previewPanel.innerHTML = '<p class="hint">Looking up this design on your relays…</p>'; }
