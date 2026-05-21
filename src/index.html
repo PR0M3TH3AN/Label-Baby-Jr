@@ -7606,8 +7606,13 @@
 
     // Pure-string SVG inner content. Shape coordinates live in a 0–100
     // viewBox so the same string scales to whatever bounds the surface uses.
-    function buildShapeSvgInner(shape, fill, stroke) {
+    // vbH = the viewBox height. The width is always 100; the height is scaled
+    // to the layer's aspect ratio so the 0–100×vbH viewBox maps to the layer
+    // box with a *uniform* scale — strokes stay even, corners stay circular.
+    function buildShapeSvgInner(shape, fill, stroke, vbH = 100) {
       if (!shape) return '';
+      const H = Number(vbH) > 0 ? Number(vbH) : 100;
+      const cy = H / 2;
       const isGradient = fill?.type === 'linear-gradient' || fill?.type === 'radial-gradient';
       const gradId = isGradient ? 'g' + Math.random().toString(36).slice(2, 9) : '';
       const defs = isGradient ? `<defs>${buildGradientDef(gradId, fill)}</defs>` : '';
@@ -7616,49 +7621,48 @@
       const kind = shape.kind;
       let body = '';
       if (kind === 'rect') {
-        body = `<rect x="0" y="0" width="100" height="100" fill="${fillAttr}"${strokeAttr}/>`;
+        body = `<rect x="0" y="0" width="100" height="${H}" fill="${fillAttr}"${strokeAttr}/>`;
       } else if (kind === 'rounded-rect') {
         const r = Math.max(0, Math.min(50, Number(shape.cornerRadius) || 0));
-        body = `<rect x="0" y="0" width="100" height="100" rx="${r}" ry="${r}" fill="${fillAttr}"${strokeAttr}/>`;
+        body = `<rect x="0" y="0" width="100" height="${H}" rx="${r}" ry="${r}" fill="${fillAttr}"${strokeAttr}/>`;
       } else if (kind === 'circle' || kind === 'ellipse') {
-        body = `<ellipse cx="50" cy="50" rx="50" ry="50" fill="${fillAttr}"${strokeAttr}/>`;
+        body = `<ellipse cx="50" cy="${cy}" rx="50" ry="${cy}" fill="${fillAttr}"${strokeAttr}/>`;
       } else if (kind === 'triangle') {
-        body = `<polygon points="50,0 100,100 0,100" fill="${fillAttr}"${strokeAttr}/>`;
+        body = `<polygon points="50,0 100,${H} 0,${H}" fill="${fillAttr}"${strokeAttr}/>`;
       } else if (kind === 'polygon') {
         const sides = Math.max(3, Math.min(20, Number(shape.sides) || 6));
         const pts = [];
         for (let i = 0; i < sides; i++) {
           const angle = (i / sides) * Math.PI * 2 - Math.PI / 2;
-          pts.push(`${(50 + 50 * Math.cos(angle)).toFixed(2)},${(50 + 50 * Math.sin(angle)).toFixed(2)}`);
+          pts.push(`${(50 + 50 * Math.cos(angle)).toFixed(2)},${(cy + cy * Math.sin(angle)).toFixed(2)}`);
         }
         body = `<polygon points="${pts.join(' ')}" fill="${fillAttr}"${strokeAttr}/>`;
       } else if (kind === 'star') {
         const points = Math.max(3, Math.min(20, Number(shape.points) || 5));
-        const inner = Math.max(0.05, Math.min(0.95, Number(shape.innerRadiusRatio) || 0.45)) * 50;
-        const outer = 50;
+        const ratio = Math.max(0.05, Math.min(0.95, Number(shape.innerRadiusRatio) || 0.45));
         const pts = [];
         for (let i = 0; i < points * 2; i++) {
           const angle = (i / (points * 2)) * Math.PI * 2 - Math.PI / 2;
-          const r = i % 2 === 0 ? outer : inner;
-          pts.push(`${(50 + r * Math.cos(angle)).toFixed(2)},${(50 + r * Math.sin(angle)).toFixed(2)}`);
+          const f = i % 2 === 0 ? 1 : ratio;
+          pts.push(`${(50 + f * 50 * Math.cos(angle)).toFixed(2)},${(cy + f * cy * Math.sin(angle)).toFixed(2)}`);
         }
         body = `<polygon points="${pts.join(' ')}" fill="${fillAttr}"${strokeAttr}/>`;
       } else if (kind === 'line') {
         const x1 = clamp01(Number(shape.x1) ?? 0, 0, 100);
-        const y1 = clamp01(Number(shape.y1) ?? 50, 0, 100);
+        const y1 = clamp01(Number(shape.y1) ?? 50, 0, 100) * H / 100;
         const x2 = clamp01(Number(shape.x2) ?? 100, 0, 100);
-        const y2 = clamp01(Number(shape.y2) ?? 50, 0, 100);
+        const y2 = clamp01(Number(shape.y2) ?? 50, 0, 100) * H / 100;
         const sw = Math.max(0.5, Math.min(50, Number(shape.strokeWidth) || 6));
         // Line strokes use the fill paint (solid color or gradient).
-        body = `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${fillAttr}" stroke-width="${sw}" stroke-linecap="round" fill="none"/>`;
+        body = `<line x1="${x1}" y1="${y1.toFixed(3)}" x2="${x2}" y2="${y2.toFixed(3)}" stroke="${fillAttr}" stroke-width="${sw}" stroke-linecap="round" fill="none"/>`;
       } else if (kind === 'path') {
         const d = String(shape.d || '');
         if (d) {
           const vb = shape.viewBox || { x: 0, y: 0, w: 100, h: 100 };
           const sx = vb.w > 0 ? 100 / vb.w : 1;
-          const sy = vb.h > 0 ? 100 / vb.h : 1;
+          const sy = vb.h > 0 ? H / vb.h : 1;
           // SVG transform applies right-to-left: translate the path's bbox to
-          // the origin, then scale so it fills the 0–100 shape space.
+          // the origin, then scale so it fills the 100×vbH shape space.
           body = `<g transform="scale(${sx.toFixed(6)} ${sy.toFixed(6)}) translate(${(-vb.x).toFixed(3)} ${(-vb.y).toFixed(3)})"><path d="${escapeHtml(d)}" fill="${fillAttr}"${strokeAttr}/></g>`;
         }
       } else if (kind === 'svg') {
@@ -7670,7 +7674,7 @@
         if (inner) {
           const vb = shape.viewBox || { x: 0, y: 0, w: 100, h: 100 };
           const sx = vb.w > 0 ? 100 / vb.w : 1;
-          const sy = vb.h > 0 ? 100 / vb.h : 1;
+          const sy = vb.h > 0 ? H / vb.h : 1;
           body = `<g transform="scale(${sx.toFixed(6)} ${sy.toFixed(6)}) translate(${(-vb.x).toFixed(3)} ${(-vb.y).toFixed(3)})">${inner}</g>`;
         }
       }
@@ -7689,11 +7693,17 @@
       const masking = isClipSourceLayer(layer);
       const fill = masking ? { type: 'none' } : layer?.fill;
       const stroke = masking ? { type: 'none' } : layer?.stroke;
-      const inner = buildShapeSvgInner(layer?.shape, fill, stroke);
+      // viewBox height tracks the layer's aspect ratio so the viewBox→layer
+      // mapping is a uniform scale — strokes/corners don't squish on a
+      // non-square layer.
+      const lw = Number(layer?.w) > 0 ? Number(layer.w) : 1;
+      const lh = Number(layer?.h) > 0 ? Number(layer.h) : 1;
+      const vbH = 100 * lh / lw;
+      const inner = buildShapeSvgInner(layer?.shape, fill, stroke, vbH);
       // overflow:visible — a stroke is centered on the path edge, so half its
-      // width sits outside the 0–100 geometry. Without this the SVG viewport
-      // clips that outer half when the stroke is wide.
-      el.innerHTML = `<svg viewBox="0 0 100 100" preserveAspectRatio="none" style="width:100%;height:100%;display:block;overflow:visible;pointer-events:none">${inner}</svg>`;
+      // width sits outside the geometry. Without this the SVG viewport clips
+      // that outer half when the stroke is wide.
+      el.innerHTML = `<svg viewBox="0 0 100 ${vbH.toFixed(4)}" preserveAspectRatio="none" style="width:100%;height:100%;display:block;overflow:visible;pointer-events:none">${inner}</svg>`;
     }
 
     // ---- Clip / mask plumbing (Phase E) ----
@@ -7714,7 +7724,10 @@
     // Build an SVG path 'd' string for a clip shape. `scale` is the size of
     // the output coordinate range (1 for objectBoundingBox 0–1 fractional
     // coords used by CSS clip-path; 100 for the canvas 0–100 viewBox space).
-    function clipShapeToPathD(shape, scale = 100) {
+    // clipW/clipH: the aspect of the layer being clipped. The clip path is
+    // applied via objectBoundingBox so it stretches to that layer's box —
+    // rounded-rect corner radii are pre-distorted here to stay circular.
+    function clipShapeToPathD(shape, scale = 100, clipW, clipH) {
       if (!shape) return '';
       const s = scale;
       const half = s / 2;
@@ -7724,7 +7737,12 @@
         const r0 = Math.max(0, Math.min(50, Number(shape.cornerRadius) || 0));
         const r = (r0 / 100) * s;
         if (r <= 0) return `M 0 0 L ${s} 0 L ${s} ${s} L 0 ${s} Z`;
-        return `M ${r} 0 L ${s - r} 0 A ${r} ${r} 0 0 1 ${s} ${r} L ${s} ${s - r} A ${r} ${r} 0 0 1 ${s - r} ${s} L ${r} ${s} A ${r} ${r} 0 0 1 0 ${s - r} L 0 ${r} A ${r} ${r} 0 0 1 ${r} 0 Z`;
+        const lw = Number(clipW) > 0 ? Number(clipW) : 1;
+        const lh = Number(clipH) > 0 ? Number(clipH) : 1;
+        const m = Math.min(lw, lh);
+        const rx = Math.min(half, r * m / lw);
+        const ry = Math.min(half, r * m / lh);
+        return `M ${rx} 0 L ${s - rx} 0 A ${rx} ${ry} 0 0 1 ${s} ${ry} L ${s} ${s - ry} A ${rx} ${ry} 0 0 1 ${s - rx} ${s} L ${rx} ${s} A ${rx} ${ry} 0 0 1 0 ${s - ry} L 0 ${ry} A ${rx} ${ry} 0 0 1 ${rx} 0 Z`;
       }
       if (k === 'circle' || k === 'ellipse') {
         // Two-arc circle so the path closes correctly at every scale.
@@ -7849,7 +7867,7 @@
           // valid <clipPath> child and browsers drop it (so the clip fails).
           dInner = `<clipPath id="${id}" clipPathUnits="objectBoundingBox"><path transform="scale(${sx.toFixed(8)} ${sy.toFixed(8)}) translate(${(-vb.x).toFixed(4)} ${(-vb.y).toFixed(4)})" d="${escapeHtml(d)}"/></clipPath>`;
         } else {
-          const d = clipShapeToPathD(src, 1);
+          const d = clipShapeToPathD(src, 1, layer.w, layer.h);
           if (!d) continue;
           dInner = `<clipPath id="${id}" clipPathUnits="objectBoundingBox"><path d="${d}"/></clipPath>`;
         }
@@ -8049,17 +8067,21 @@
       closeShapePathModal();
     }
 
-    function roundedRectPath(ctx, x, y, w, h, r) {
-      r = Math.max(0, Math.min(r, w / 2, h / 2));
-      ctx.moveTo(x + r, y);
-      ctx.lineTo(x + w - r, y);
-      ctx.arcTo(x + w, y, x + w, y + r, r);
-      ctx.lineTo(x + w, y + h - r);
-      ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
-      ctx.lineTo(x + r, y + h);
-      ctx.arcTo(x, y + h, x, y + h - r, r);
-      ctx.lineTo(x, y + r);
-      ctx.arcTo(x, y, x + r, y, r);
+    // Rounded-rect path with independent corner radii (rx/ry) so corners can
+    // be pre-distorted to render circular under a non-uniform scale.
+    function roundedRectPath(ctx, x, y, w, h, rx, ry) {
+      rx = Math.max(0, Math.min(rx, w / 2));
+      ry = Math.max(0, Math.min(ry, h / 2));
+      const HP = Math.PI / 2;
+      ctx.moveTo(x + rx, y);
+      ctx.lineTo(x + w - rx, y);
+      ctx.ellipse(x + w - rx, y + ry, rx, ry, 0, -HP, 0);
+      ctx.lineTo(x + w, y + h - ry);
+      ctx.ellipse(x + w - rx, y + h - ry, rx, ry, 0, 0, HP);
+      ctx.lineTo(x + rx, y + h);
+      ctx.ellipse(x + rx, y + h - ry, rx, ry, 0, HP, Math.PI);
+      ctx.lineTo(x, y + ry);
+      ctx.ellipse(x + rx, y + ry, rx, ry, 0, Math.PI, Math.PI + HP);
       ctx.closePath();
     }
 
@@ -8118,9 +8140,12 @@
       const fill = masking ? { type: 'none' } : layer?.fill;
       if (!shape) return;
       ctx.save();
-      // Map the 0–100 shape viewBox to (-w/2..w/2, -h/2..h/2) pixel space.
+      // Map a 100×vbH viewBox (aspect-matched to the layer) into the layer
+      // box with a uniform scale, so strokes and corners don't squish.
+      const vbH = 100 * h / (w || 1);
+      const cy = vbH / 2;
       ctx.translate(-w / 2, -h / 2);
-      ctx.scale(w / 100, h / 100);
+      ctx.scale(w / 100, w / 100);
       const paint = buildCanvasFillStyle(ctx, fill);
       const kind = shape.kind;
 
@@ -8131,8 +8156,8 @@
         const y2 = clamp01(Number(shape.y2) ?? 50, 0, 100);
         const sw = Math.max(0.5, Math.min(50, Number(shape.strokeWidth) || 6));
         ctx.beginPath();
-        ctx.moveTo(x1, y1);
-        ctx.lineTo(x2, y2);
+        ctx.moveTo(x1, y1 * vbH / 100);
+        ctx.lineTo(x2, y2 * vbH / 100);
         ctx.strokeStyle = paint || '#000';
         ctx.lineWidth = sw;
         ctx.lineCap = 'round';
@@ -8148,7 +8173,7 @@
         const d = String(shape.d || '');
         if (!d) { ctx.restore(); return; }
         const vb = shape.viewBox || { x: 0, y: 0, w: 100, h: 100 };
-        ctx.scale(vb.w > 0 ? 100 / vb.w : 1, vb.h > 0 ? 100 / vb.h : 1);
+        ctx.scale(vb.w > 0 ? 100 / vb.w : 1, vb.h > 0 ? vbH / vb.h : 1);
         ctx.translate(-vb.x, -vb.y);
         let p2d;
         try { p2d = new Path2D(d); } catch { ctx.restore(); return; }
@@ -8169,35 +8194,35 @@
 
       ctx.beginPath();
       if (kind === 'rect') {
-        ctx.rect(0, 0, 100, 100);
+        ctx.rect(0, 0, 100, vbH);
       } else if (kind === 'rounded-rect') {
         const r = Math.max(0, Math.min(50, Number(shape.cornerRadius) || 0));
-        roundedRectPath(ctx, 0, 0, 100, 100, r);
+        // Uniform scale now, so equal rx/ry render as circular corners.
+        roundedRectPath(ctx, 0, 0, 100, vbH, r, r);
       } else if (kind === 'circle' || kind === 'ellipse') {
-        ctx.ellipse(50, 50, 50, 50, 0, 0, Math.PI * 2);
+        ctx.ellipse(50, cy, 50, cy, 0, 0, Math.PI * 2);
       } else if (kind === 'triangle') {
         ctx.moveTo(50, 0);
-        ctx.lineTo(100, 100);
-        ctx.lineTo(0, 100);
+        ctx.lineTo(100, vbH);
+        ctx.lineTo(0, vbH);
         ctx.closePath();
       } else if (kind === 'polygon') {
         const sides = Math.max(3, Math.min(20, Number(shape.sides) || 6));
         for (let i = 0; i < sides; i++) {
           const angle = (i / sides) * Math.PI * 2 - Math.PI / 2;
           const px = 50 + 50 * Math.cos(angle);
-          const py = 50 + 50 * Math.sin(angle);
+          const py = cy + cy * Math.sin(angle);
           if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
         }
         ctx.closePath();
       } else if (kind === 'star') {
         const points = Math.max(3, Math.min(20, Number(shape.points) || 5));
-        const inner = Math.max(0.05, Math.min(0.95, Number(shape.innerRadiusRatio) || 0.45)) * 50;
-        const outer = 50;
+        const ratio = Math.max(0.05, Math.min(0.95, Number(shape.innerRadiusRatio) || 0.45));
         for (let i = 0; i < points * 2; i++) {
           const angle = (i / (points * 2)) * Math.PI * 2 - Math.PI / 2;
-          const r = i % 2 === 0 ? outer : inner;
-          const px = 50 + r * Math.cos(angle);
-          const py = 50 + r * Math.sin(angle);
+          const f = i % 2 === 0 ? 1 : ratio;
+          const px = 50 + f * 50 * Math.cos(angle);
+          const py = cy + f * cy * Math.sin(angle);
           if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
         }
         ctx.closePath();
@@ -10392,11 +10417,7 @@
       // the layer's draw region.
       const clipSrc = resolveClipSourceShape(layer, state.layers);
       if (clipSrc) {
-        let clipD = clipShapeToPathD(clipSrc, 100);
-        if (clipSrc.kind === 'path') {
-          // Path shapes are stored in their own viewBox; first scale that
-          // into 0–100 manually via a sub-matrix.
-        }
+        let clipD = clipShapeToPathD(clipSrc, 100, layer.w, layer.h);
         if (clipD) {
           try {
             const matrix = new DOMMatrix().translate(-w / 2, -h / 2).scale(w / 100, h / 100);
