@@ -451,9 +451,13 @@
     }
 
     .sidebarFooter a {
+      display: block;
       color: var(--accent);
       font-weight: 800;
       text-decoration: none;
+    }
+    .sidebarFooter a + a {
+      margin-top: 4px;
     }
 
     .sidebarFooter a:hover {
@@ -2068,16 +2072,16 @@
       <div class="appTitle">
         <div class="appHeader">
           <div class="appLogoRow">
-            <img src="logo.gif" alt="Artstr" class="appLogo" style="height: 48px;" />
+            <img src="Artstr_icon_animated_transparent.gif" alt="Artstr" class="appLogo" style="height: 62px; padding-right: 12px;" />
             <h1>Artstr Studio</h1>
           </div>
         </div>
-        <p class="subhead">Design printable case wraps and disc labels, then save, print, or share them on Nostr.</p>
+        <p class="subhead">A free, open canvas for any design — built on Nostr.</p>
       </div>
 
       <div class="appModeTabs">
         <button type="button" class="appModeTab active" id="modeTabTemplate"><img src="paper_icon_32px.png" alt="Template" style="height: 40px; width: auto;" />Template</button>
-        <button type="button" class="appModeTab" id="modeTabDesigner"><img src="disk_icon_32px.png" alt="Designer" style="height: 40px; width: auto;" />Designer</button>
+        <button type="button" class="appModeTab" id="modeTabDesigner"><img src="design_icon_32px.png" alt="Designer" style="height: 40px; width: auto;" />Designer</button>
       </div>
 
 
@@ -2789,7 +2793,8 @@
       </fieldset>
 
       <div class="sidebarFooter">
-        <a href="https://github.com/PR0M3TH3AN/Lable-Baby-Jr" target="_blank" rel="noopener noreferrer">GitHub Repository</a>
+        <a href="https://github.com/PR0M3TH3AN/Artstr-Studio" target="_blank" rel="noopener noreferrer">GitHub Repository</a>
+        <a href="https://artstr.org" target="_blank" rel="noopener noreferrer">artstr.org</a>
       </div>
 
     </aside>
@@ -3298,6 +3303,28 @@
       <div class="buttonRow" style="margin:0;justify-content:flex-end;flex-wrap:wrap;gap:8px">
         <button type="button" id="publishConfirmCancelBtn">Cancel</button>
         <button type="button" id="publishConfirmPublishBtn" class="primary">Publish</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal" id="supportDevModal" aria-hidden="true" style="display:none">
+    <div class="modalInner" style="max-width:420px;position:relative">
+      <button type="button" id="supportDevCloseBtn" class="welcomeCloseBtn" aria-label="Close">×</button>
+      <div id="supportDevAskView">
+        <h2 style="margin:0 0 4px;font-size:1.05rem;font-family:inherit">Published to Nostr 🎉</h2>
+        <p class="hint" style="margin:0 0 16px">Your design is live on the relays. Enjoying Artstr Studio so far?</p>
+        <div class="buttonRow" style="margin:0;justify-content:flex-end;gap:8px">
+          <button type="button" id="supportDevNoBtn">Not now</button>
+          <button type="button" id="supportDevYesBtn" class="primary">Yes, I like it</button>
+        </div>
+      </div>
+      <div id="supportDevZapView" style="display:none">
+        <h2 style="margin:0 0 4px;font-size:1.05rem;font-family:inherit">Support the developer ⚡</h2>
+        <p class="hint" style="margin:0 0 16px">Artstr Studio is built and maintained by one developer. If it's helping you create, a zap keeps it going — thank you!</p>
+        <div class="buttonRow" style="margin:0;justify-content:flex-end;gap:8px">
+          <button type="button" id="supportDevLaterBtn">Maybe later</button>
+          <button type="button" id="supportDevZapBtn" class="primary">Zap the developer ⚡</button>
+        </div>
       </div>
     </div>
   </div>
@@ -7657,7 +7684,12 @@
     }
 
     function renderShapeIntoElement(el, layer) {
-      const inner = buildShapeSvgInner(layer?.shape, layer?.fill, layer?.stroke);
+      // A shape used as a clip/mask source is just a window — drop its own
+      // fill and stroke so the layer it clips shows through cleanly.
+      const masking = isClipSourceLayer(layer);
+      const fill = masking ? { type: 'none' } : layer?.fill;
+      const stroke = masking ? { type: 'none' } : layer?.stroke;
+      const inner = buildShapeSvgInner(layer?.shape, fill, stroke);
       // overflow:visible — a stroke is centered on the path edge, so half its
       // width sits outside the 0–100 geometry. Without this the SVG viewport
       // clips that outer half when the stroke is wide.
@@ -7758,6 +7790,17 @@
       return 'clip-' + String(layer.id || '').replace(/[^a-z0-9-]/gi, '_');
     }
 
+    // True if this shape layer is referenced as a clip/mask source by another
+    // layer. Such a shape is just a window — it renders no fill/stroke of its
+    // own; the layer it clips shows through its outline instead.
+    function isClipSourceLayer(layer) {
+      if (!layer || layer.type !== 'shape') return false;
+      const layers = state.layers || [];
+      return layers.some(l => l !== layer
+        && l.clip && l.clip.kind === 'layer-ref' && l.clip.layerId === layer.id
+        && resolveClipSourceShape(l, layers));
+    }
+
     // Ensure a hidden <svg id="globalClipDefs"> exists so we can inject
     // <clipPath> elements that the layer wrappers reference via clip-path: url(#…).
     function clipPathStyleFragment(layer, layers) {
@@ -7802,7 +7845,9 @@
           const vb = src.viewBox || { x: 0, y: 0, w: 100, h: 100 };
           const sx = vb.w > 0 ? 1 / vb.w : 1;
           const sy = vb.h > 0 ? 1 / vb.h : 1;
-          dInner = `<clipPath id="${id}" clipPathUnits="objectBoundingBox"><g transform="scale(${sx.toFixed(8)} ${sy.toFixed(8)}) translate(${(-vb.x).toFixed(4)} ${(-vb.y).toFixed(4)})"><path d="${escapeHtml(d)}"/></g></clipPath>`;
+          // The transform goes on the <path> itself — a <g> wrapper is not a
+          // valid <clipPath> child and browsers drop it (so the clip fails).
+          dInner = `<clipPath id="${id}" clipPathUnits="objectBoundingBox"><path transform="scale(${sx.toFixed(8)} ${sy.toFixed(8)}) translate(${(-vb.x).toFixed(4)} ${(-vb.y).toFixed(4)})" d="${escapeHtml(d)}"/></clipPath>`;
         } else {
           const d = clipShapeToPathD(src, 1);
           if (!d) continue;
@@ -8068,7 +8113,9 @@
     // to draw within the (-w/2..w/2, -h/2..h/2) box.
     function drawShapeLayerToCanvas(ctx, layer, w, h) {
       const shape = layer?.shape;
-      const fill = layer?.fill;
+      // A clip/mask source draws no fill or stroke of its own.
+      const masking = isClipSourceLayer(layer);
+      const fill = masking ? { type: 'none' } : layer?.fill;
       if (!shape) return;
       ctx.save();
       // Map the 0–100 shape viewBox to (-w/2..w/2, -h/2..h/2) pixel space.
@@ -8106,7 +8153,7 @@
         let p2d;
         try { p2d = new Path2D(d); } catch { ctx.restore(); return; }
         if (paint) { ctx.fillStyle = paint; ctx.fill(p2d); }
-        const ps = layer?.stroke;
+        const ps = masking ? null : layer?.stroke;
         if (ps && ps.type === 'solid') {
           const sw = Math.max(0.1, Math.min(50, Number(ps.width) || 2));
           ctx.lineWidth = sw;
@@ -8161,7 +8208,7 @@
         ctx.fill();
       }
       // Stroke pass — only for non-line shapes (lines already drew above).
-      const stroke = layer?.stroke;
+      const stroke = masking ? null : layer?.stroke;
       if (stroke && stroke.type === 'solid') {
         const sw = Math.max(0.1, Math.min(50, Number(stroke.width) || 2));
         ctx.lineWidth = sw;
@@ -10893,6 +10940,58 @@
       _publishConfirmTarget = null;
     }
 
+    // ---- Support-the-developer prompt (shown once per session after a publish) ----
+
+    const DEV_NPUB = 'npub15jnttpymeytm80hatjqcvhhqhzrhx6gxp8pq0wn93rhnu8s9h9dsha32lx';
+    let _supportDevShownThisSession = false;
+
+    function openSupportDevModal() {
+      if (_supportDevShownThisSession) return;
+      // Don't ask the developer to zap themselves.
+      const dev = decodeProfileIdentifier(DEV_NPUB);
+      if (dev?.pubkey && state.community?.myPubkey === dev.pubkey) return;
+      _supportDevShownThisSession = true;
+      const modal = $('supportDevModal');
+      if (!modal) return;
+      $('supportDevAskView').style.display = '';
+      $('supportDevZapView').style.display = 'none';
+      modal.style.display = 'flex';
+      modal.setAttribute('aria-hidden', 'false');
+      bringModalToFront(modal);
+    }
+
+    function closeSupportDevModal() {
+      const modal = $('supportDevModal');
+      if (modal) { modal.style.display = 'none'; modal.setAttribute('aria-hidden', 'true'); }
+    }
+
+    // Resolve the developer's Lightning address from their Nostr profile and
+    // hand off to the existing tip/zap modal.
+    async function zapDeveloper() {
+      const dev = decodeProfileIdentifier(DEV_NPUB);
+      if (!dev?.pubkey) { toastError('Could not resolve the developer profile.'); return; }
+      const btn = $('supportDevZapBtn');
+      if (btn) { btn.disabled = true; btn.textContent = 'Looking up…'; }
+      try {
+        const profile = await ensureProfilePageData(dev.pubkey, dev.relays);
+        const lnurlpUrl = resolveLnurlPayUrl(profile);
+        if (!lnurlpUrl) {
+          toastError('The developer hasn’t published a Lightning address yet.');
+          return;
+        }
+        closeSupportDevModal();
+        openTipModal({
+          lnurlpUrl,
+          label: bestDisplayName(profile, dev.pubkey),
+          lud16: profile?.lud16 || ''
+        });
+      } catch (err) {
+        toastError(err?.message || 'Could not reach relays to look up the developer.');
+      } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Zap the developer ⚡'; }
+      }
+    }
+
     async function handlePublishConfirmPublish() {
       const target = _publishConfirmTarget;
       if (!target?.onConfirm) return;
@@ -10903,6 +11002,7 @@
       try {
         await target.onConfirm();
         closePublishConfirmModal();
+        openSupportDevModal();
       } catch (err) {
         const msg = err?.message || String(err);
         if (errEl) { errEl.textContent = msg; errEl.style.display = ''; }
@@ -16105,8 +16205,18 @@
       on('publishConfirmCloseBtn', 'click', closePublishConfirmModal);
       on('publishConfirmCancelBtn', 'click', closePublishConfirmModal);
       on('publishConfirmPublishBtn', 'click', handlePublishConfirmPublish);
+      on('supportDevCloseBtn', 'click', closeSupportDevModal);
+      on('supportDevNoBtn', 'click', closeSupportDevModal);
+      on('supportDevLaterBtn', 'click', closeSupportDevModal);
+      on('supportDevYesBtn', 'click', () => {
+        $('supportDevAskView').style.display = 'none';
+        $('supportDevZapView').style.display = '';
+      });
+      on('supportDevZapBtn', 'click', zapDeveloper);
       const publishConfirmModalEl = $('publishConfirmModal');
       if (publishConfirmModalEl) publishConfirmModalEl.addEventListener('click', e => { if (e.target === publishConfirmModalEl) closePublishConfirmModal(); });
+      const supportDevModalEl = $('supportDevModal');
+      if (supportDevModalEl) supportDevModalEl.addEventListener('click', e => { if (e.target === supportDevModalEl) closeSupportDevModal(); });
       const closeProjectModalEl = $('closeProjectModal');
       if (closeProjectModalEl) closeProjectModalEl.addEventListener('click', e => { if (e.target === closeProjectModalEl) closeCloseProjectModal(); });
       on('profileCloseBtn', 'click', () => closeProfilePage());
@@ -16239,6 +16349,8 @@
         if (tipM && tipM.getAttribute('aria-hidden') === 'false') { closeTipModal(); return; }
         const pubConfirmM = $('publishConfirmModal');
         if (pubConfirmM && pubConfirmM.getAttribute('aria-hidden') === 'false') { closePublishConfirmModal(); return; }
+        const supportM = $('supportDevModal');
+        if (supportM && supportM.getAttribute('aria-hidden') === 'false') { closeSupportDevModal(); return; }
         const shapePathM = $('shapePathModal');
         if (shapePathM && shapePathM.getAttribute('aria-hidden') === 'false') { closeShapePathModal(); return; }
         const profileM = $('profileModal');
