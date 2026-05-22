@@ -50,6 +50,12 @@ surface + canvas export, JSON round-trip).
 
 Each has a full spec in `docs/`.
 
+- **Private (encrypted) publishing** — `docs/PRIVATE_PUBLISHING_FEATURE.md`.
+  Publish any design encrypted, readable only by the author (Phase 1
+  "private to me"). The agreed next build; Phase 0 is a validation spike.
+- **Artstr Stacks** — `docs/STACKS_FEATURE.md`. Interactive fullscreen
+  page/card stacks (HyperCard for Nostr) — the Slide Deck extended with
+  layer actions and an interactive viewer. Queued after private publishing.
 - **Badges (NIP-58)** — `docs/BADGES_FEATURE.md`. Award / display Nostr
   badges on profile pages.
 - **Collections (NIP-51 sets)** — `docs/COLLECTIONS_FEATURE.md`. Let users
