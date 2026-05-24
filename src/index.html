@@ -1400,6 +1400,16 @@
       outline-style: dashed;
     }
 
+    .layerSelectionBox {
+      position: absolute;
+      outline: 2px dashed var(--accent);
+      outline-offset: 2px;
+      pointer-events: auto;
+      z-index: 9999;
+      box-sizing: border-box;
+      cursor: move;
+    }
+
     /* Drag-resize handles on the selected layer — 4 corners + 4 edges. */
     .layerHandle {
       position: absolute;
@@ -9650,7 +9660,42 @@
 
         (isDesignerLayer ? designerOverlay : overlay).appendChild(el);
       }
+      renderLayerSelectionBox(false);
+      renderLayerSelectionBox(true);
       renderLayerList();
+    }
+
+    function renderLayerSelectionBox(isDesignerLayer) {
+      const host = isDesignerLayer ? $('designerLayerOverlay') : $('layerOverlay');
+      if (!host) return;
+      const layers = selectionTransformLayers(isDesignerLayer);
+      if (layers.length <= 1) return;
+      const bounds = layersBounds(layers);
+      if (!bounds || bounds.w <= 0 || bounds.h <= 0) return;
+      const box = document.createElement('div');
+      box.className = 'layerSelectionBox';
+      if (isDesignerLayer) {
+        const d = discTemplate.discD;
+        box.style.left = `${bounds.x / d * 100}%`;
+        box.style.top = `${bounds.y / d * 100}%`;
+        box.style.width = `${bounds.w / d * 100}%`;
+        box.style.height = `${bounds.h / d * 100}%`;
+      } else {
+        box.style.left = inches(bounds.x);
+        box.style.top = inches(bounds.y);
+        box.style.width = inches(bounds.w);
+        box.style.height = inches(bounds.h);
+      }
+      box.addEventListener('pointerdown', startLayerSelectionDrag);
+      for (const dir of ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']) {
+        const handle = document.createElement('div');
+        handle.className = `layerHandle lh-${dir}`;
+        handle.dataset.handle = dir;
+        handle.addEventListener('pointerdown', startLayerSelectionResize);
+        handle.addEventListener('click', (e) => e.stopPropagation());
+        box.appendChild(handle);
+      }
+      host.appendChild(box);
     }
 
     // A layer-list row: the selectable item button + a visibility eye toggle.
@@ -11109,6 +11154,31 @@
       return selectedLayerIds().map(getLayer).filter(Boolean);
     }
 
+    function selectionTransformLayers(isDesignerLayer) {
+      return selectedLayers().filter(layer =>
+        layer && !layer.hidden && !layer.locked && !layer._generatedDiscLayer &&
+        (layer.target === 'designer-disc') === isDesignerLayer &&
+        (isDesignerLayer || isLayerForCurrentMode(layer))
+      );
+    }
+
+    function layersBounds(layers) {
+      if (!layers.length) return null;
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const layer of layers) {
+        const x = Number(layer.x) || 0;
+        const y = Number(layer.y) || 0;
+        const w = Number(layer.w) || 0;
+        const h = Number(layer.h) || 0;
+        minX = Math.min(minX, x);
+        minY = Math.min(minY, y);
+        maxX = Math.max(maxX, x + w);
+        maxY = Math.max(maxY, y + h);
+      }
+      if (![minX, minY, maxX, maxY].every(Number.isFinite)) return null;
+      return { x: minX, y: minY, w: Math.max(0, maxX - minX), h: Math.max(0, maxY - minY) };
+    }
+
     function ensureLayerGroups() {
       if (!state.layerGroups || typeof state.layerGroups !== 'object' || Array.isArray(state.layerGroups)) state.layerGroups = {};
       return state.layerGroups;
@@ -12040,6 +12110,174 @@
       if (controlsEl) {
         try { controlsEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); } catch {}
       }
+    }
+
+    function updateLayerElementBox(layer, isDesignerLayer) {
+      const layerEl = document.querySelector(`.freeLayer[data-layer-id="${layer.id}"]`);
+      if (!layerEl) return;
+      if (isDesignerLayer) {
+        const d = discTemplate.discD;
+        layerEl.style.left = `${layer.x / d * 100}%`;
+        layerEl.style.top = `${layer.y / d * 100}%`;
+        layerEl.style.width = `${layer.w / d * 100}%`;
+        layerEl.style.height = `${layer.h / d * 100}%`;
+      } else {
+        layerEl.style.left = inches(layer.x);
+        layerEl.style.top = inches(layer.y);
+        layerEl.style.width = inches(layer.w);
+        layerEl.style.height = inches(layer.h);
+      }
+    }
+
+    function updateSelectionBoxElement(box, bounds, isDesignerLayer) {
+      if (isDesignerLayer) {
+        const d = discTemplate.discD;
+        box.style.left = `${bounds.x / d * 100}%`;
+        box.style.top = `${bounds.y / d * 100}%`;
+        box.style.width = `${bounds.w / d * 100}%`;
+        box.style.height = `${bounds.h / d * 100}%`;
+      } else {
+        box.style.left = inches(bounds.x);
+        box.style.top = inches(bounds.y);
+        box.style.width = inches(bounds.w);
+        box.style.height = inches(bounds.h);
+      }
+    }
+
+    function startLayerSelectionDrag(event) {
+      if (event.target.classList.contains('layerHandle')) return;
+      event.preventDefault();
+      event.stopPropagation();
+      blurEditableFocus();
+      const box = event.currentTarget;
+      const isDesignerLayer = !!box.closest('#designerLayerOverlay');
+      const layers = selectionTransformLayers(isDesignerLayer);
+      if (layers.length <= 1) return;
+      const dragHost = isDesignerLayer ? $('designerDiscWrap') : $('sheet');
+      const hostRect = dragHost.getBoundingClientRect();
+      const unitW = isDesignerLayer ? discTemplate.discD : sheetW();
+      const unitH = isDesignerLayer ? discTemplate.discD : sheetH();
+      const startX = event.clientX;
+      const startY = event.clientY;
+      const origins = layers.map(layer => ({ layer, x: Number(layer.x) || 0, y: Number(layer.y) || 0 }));
+      let snapshotted = false;
+      document.body.classList.add('dragging-layer');
+      box.setPointerCapture(event.pointerId);
+
+      const move = (moveEvent) => {
+        if (!snapshotted) { pushHistory('move selected layers'); snapshotted = true; }
+        const dx = (moveEvent.clientX - startX) / hostRect.width * unitW;
+        const dy = (moveEvent.clientY - startY) / hostRect.height * unitH;
+        for (const origin of origins) {
+          origin.layer.x = origin.x + dx;
+          origin.layer.y = origin.y + dy;
+          updateLayerElementBox(origin.layer, isDesignerLayer);
+        }
+        const bounds = layersBounds(layers);
+        if (bounds) updateSelectionBoxElement(box, bounds, isDesignerLayer);
+        syncLayerInputs();
+      };
+
+      const stop = () => {
+        document.body.classList.remove('dragging-layer');
+        box.removeEventListener('pointermove', move);
+        box.removeEventListener('pointerup', stop);
+        box.removeEventListener('pointercancel', stop);
+        localStorage.setItem('case-cover-template-maker-autosave', JSON.stringify(state));
+      };
+
+      box.addEventListener('pointermove', move);
+      box.addEventListener('pointerup', stop);
+      box.addEventListener('pointercancel', stop);
+    }
+
+    function startLayerSelectionResize(event) {
+      event.preventDefault();
+      event.stopPropagation();
+      blurEditableFocus();
+      const handle = event.currentTarget;
+      const box = handle.parentElement;
+      const dir = handle.dataset.handle;
+      const isDesignerLayer = !!box.closest('#designerLayerOverlay');
+      const layers = selectionTransformLayers(isDesignerLayer);
+      if (layers.length <= 1) return;
+      const startBounds = layersBounds(layers);
+      if (!startBounds || startBounds.w <= 0 || startBounds.h <= 0) return;
+
+      const dragHost = isDesignerLayer ? $('designerDiscWrap') : $('sheet');
+      const hostRect = dragHost.getBoundingClientRect();
+      const unitW = isDesignerLayer ? discTemplate.discD : sheetW();
+      const unitH = isDesignerLayer ? discTemplate.discD : sheetH();
+      const startX = event.clientX;
+      const startY = event.clientY;
+      const origins = layers.map(layer => ({
+        layer,
+        x: Number(layer.x) || 0,
+        y: Number(layer.y) || 0,
+        w: Number(layer.w) || 0,
+        h: Number(layer.h) || 0
+      }));
+      const drivesW = dir.includes('e') || dir.includes('w');
+      const drivesH = dir.includes('n') || dir.includes('s');
+      const fixedX = dir.includes('w') ? startBounds.x + startBounds.w : startBounds.x;
+      const fixedY = dir.includes('n') ? startBounds.y + startBounds.h : startBounds.y;
+      const MIN = 0.12;
+      let snapshotted = false;
+      document.body.classList.add('dragging-layer');
+      handle.setPointerCapture(event.pointerId);
+
+      const move = (moveEvent) => {
+        if (!snapshotted) { pushHistory('scale selected layers'); snapshotted = true; }
+        const dx = (moveEvent.clientX - startX) / hostRect.width * unitW;
+        const dy = (moveEvent.clientY - startY) / hostRect.height * unitH;
+        let nextX = startBounds.x;
+        let nextY = startBounds.y;
+        let nextW = startBounds.w;
+        let nextH = startBounds.h;
+        if (dir.includes('e')) nextW = Math.max(MIN, startBounds.w + dx);
+        if (dir.includes('s')) nextH = Math.max(MIN, startBounds.h + dy);
+        if (dir.includes('w')) {
+          nextW = Math.max(MIN, startBounds.w - dx);
+          nextX = fixedX - nextW;
+        }
+        if (dir.includes('n')) {
+          nextH = Math.max(MIN, startBounds.h - dy);
+          nextY = fixedY - nextH;
+        }
+        const isCorner = drivesW && drivesH;
+        if (_aspectLocked && isCorner) {
+          const sxRaw = nextW / startBounds.w;
+          const syRaw = nextH / startBounds.h;
+          const scale = Math.max(MIN / startBounds.w, MIN / startBounds.h, Math.abs(sxRaw) >= Math.abs(syRaw) ? sxRaw : syRaw);
+          nextW = startBounds.w * scale;
+          nextH = startBounds.h * scale;
+          if (dir.includes('w')) nextX = fixedX - nextW;
+          if (dir.includes('n')) nextY = fixedY - nextH;
+        }
+        const scaleX = drivesW ? nextW / startBounds.w : 1;
+        const scaleY = drivesH ? nextH / startBounds.h : 1;
+        for (const origin of origins) {
+          origin.layer.x = nextX + (origin.x - startBounds.x) * scaleX;
+          origin.layer.y = nextY + (origin.y - startBounds.y) * scaleY;
+          origin.layer.w = Math.max(MIN, origin.w * scaleX);
+          origin.layer.h = Math.max(MIN, origin.h * scaleY);
+          updateLayerElementBox(origin.layer, isDesignerLayer);
+        }
+        updateSelectionBoxElement(box, { x: nextX, y: nextY, w: nextW, h: nextH }, isDesignerLayer);
+        syncLayerInputs();
+      };
+
+      const stop = () => {
+        document.body.classList.remove('dragging-layer');
+        handle.removeEventListener('pointermove', move);
+        handle.removeEventListener('pointerup', stop);
+        handle.removeEventListener('pointercancel', stop);
+        if (snapshotted) render();
+      };
+
+      handle.addEventListener('pointermove', move);
+      handle.addEventListener('pointerup', stop);
+      handle.addEventListener('pointercancel', stop);
     }
 
     // Drag-resize a layer from one of its 8 handles. Resizes in the layer's

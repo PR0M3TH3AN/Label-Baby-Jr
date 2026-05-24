@@ -5,9 +5,6 @@ Running list of deferred work. Detailed specs for the larger items live in
 
 ## Adam's working list
 
-- **Layer groups and multi-select transforms.** Add layer groups, group
-  naming, selecting multiple layers / objects at once, and moving / scaling
-  grouped or multi-selected objects together.
 - **Slide deck PDF export.** Add multi-slide PDF export for slide
   presentations, producing one page per slide.
 - **Pixel editor layout expansion.** Enlarge the pixel editor so it uses the
