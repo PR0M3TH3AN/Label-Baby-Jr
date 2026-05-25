@@ -808,6 +808,9 @@
     .pixelExportScaleBtn:hover { background: #f1f5f9; }
     .pixelExportScaleBtn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
     .pixelExportToggle { display: flex; align-items: center; gap: 6px; font-size: .8rem; cursor: pointer; }
+    .pixelResizeField { display: flex; align-items: center; gap: 6px; font-size: .82rem; flex: 1; }
+    .pixelResizeField input { width: 64px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px; font-family: inherit; }
+    .pixelResizeHint { margin: 2px 0 0; font-size: .72rem; color: #64748b; line-height: 1.35; }
     body.dark .pixelExportScaleBtn { background: var(--panel); }
     body.dark .pixelExportScaleBtn:hover { background: #1e293b; }
     .pixelPickerPreview {
@@ -3446,7 +3449,28 @@
             <button type="button" id="pixelZoomOut" class="pixelBarBtn" title="Zoom out">−</button>
             <button type="button" id="pixelZoomIn" class="pixelBarBtn" title="Zoom in">+</button>
             <span class="pixelBarSpacer"></span>
-            <span id="pixelEditorDims" class="pixelBarInfo"></span>
+            <div class="pixelExportWrap">
+              <button type="button" id="pixelResizeBtn" class="pixelBarBtn" aria-haspopup="true" aria-expanded="false" title="Resize grid"><span id="pixelEditorDims"></span> ▾</button>
+              <div id="pixelResizeMenu" class="pixelExportMenu">
+                <div class="pixelExportRow">
+                  <label class="pixelResizeField">W <input type="number" id="pixelResizeW" min="4" max="128" step="1" /></label>
+                  <label class="pixelResizeField">H <input type="number" id="pixelResizeH" min="4" max="128" step="1" /></label>
+                </div>
+                <div class="pixelExportRow">
+                  <span class="pixelExportLabel">Presets</span>
+                  <div class="pixelExportScales" id="pixelResizePresets">
+                    <button type="button" data-preset="16" class="pixelExportScaleBtn">16</button>
+                    <button type="button" data-preset="32" class="pixelExportScaleBtn">32</button>
+                    <button type="button" data-preset="48" class="pixelExportScaleBtn">48</button>
+                    <button type="button" data-preset="64" class="pixelExportScaleBtn">64</button>
+                    <button type="button" data-preset="96" class="pixelExportScaleBtn">96</button>
+                    <button type="button" data-preset="128" class="pixelExportScaleBtn">128</button>
+                  </div>
+                </div>
+                <p class="pixelResizeHint">Top-left anchor. New cells transparent; oversize crops. 4–128 per side.</p>
+                <button type="button" id="pixelResizeApplyBtn" class="pixelBarBtn primary">Apply</button>
+              </div>
+            </div>
             <div class="pixelExportWrap">
               <button type="button" id="pixelExportPngBtn" class="pixelBarBtn" aria-haspopup="true" aria-expanded="false">Export PNG ▾</button>
               <div id="pixelExportMenu" class="pixelExportMenu">
@@ -8887,6 +8911,42 @@
       }
       renderPixelGrid();
       pixelCommitIfStandalone();
+    }
+
+    function pixelResize(newW, newH) {
+      if (!_pixelEdit) return;
+      newW = Math.max(4, Math.min(128, newW | 0));
+      newH = Math.max(4, Math.min(128, newH | 0));
+      if (newW === _pixelEdit.w && newH === _pixelEdit.h) return;
+      pixelSnapshot();
+      const { w, h, indices } = _pixelEdit;
+      // Zero-initialized Uint8Array = palette index 0 = transparent by convention.
+      const out = new Uint8Array(newW * newH);
+      const cw = Math.min(w, newW);
+      const ch = Math.min(h, newH);
+      for (let y = 0; y < ch; y++)
+        for (let x = 0; x < cw; x++) out[y * newW + x] = indices[y * w + x];
+      _pixelEdit.w = newW;
+      _pixelEdit.h = newH;
+      _pixelEdit.indices = out;
+      const dims = $('pixelEditorDims');
+      if (dims) dims.textContent = `${newW} × ${newH} px`;
+      renderPixelGrid();
+      pixelCommitIfStandalone();
+    }
+
+    function pixelResizeMenuToggle(forceOpen) {
+      const menu = $('pixelResizeMenu');
+      const btn = $('pixelResizeBtn');
+      if (!menu || !btn) return;
+      const isOpen = menu.classList.contains('open');
+      const willOpen = forceOpen !== undefined ? forceOpen : !isOpen;
+      menu.classList.toggle('open', willOpen);
+      btn.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+      if (willOpen && _pixelEdit) {
+        const wi = $('pixelResizeW'); if (wi) wi.value = _pixelEdit.w;
+        const hi = $('pixelResizeH'); if (hi) hi.value = _pixelEdit.h;
+      }
     }
 
     function pixelFloodFill(x, y, idx) {
@@ -19332,6 +19392,46 @@
         $('pixelExportDownloadBtn')?.addEventListener('click', async () => {
           await pixelExportDownload();
           pixelExportMenuToggle(false);
+        });
+      }
+
+      // ---- Grid resize dropdown ----
+      const _pixelResizeBtn = $('pixelResizeBtn');
+      const _pixelResizeMenu = $('pixelResizeMenu');
+      if (_pixelResizeBtn && _pixelResizeMenu) {
+        _pixelResizeBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          pixelResizeMenuToggle();
+        });
+        const _maybeCloseResize = (e) => {
+          if (!_pixelResizeMenu.classList.contains('open')) return;
+          if (_pixelResizeMenu.contains(e.target) || _pixelResizeBtn.contains(e.target)) return;
+          pixelResizeMenuToggle(false);
+        };
+        document.addEventListener('click', _maybeCloseResize);
+        document.addEventListener('pointerdown', _maybeCloseResize, true);
+        document.addEventListener('keydown', (e) => {
+          if (e.key === 'Escape' && _pixelResizeMenu.classList.contains('open')) {
+            pixelResizeMenuToggle(false);
+          }
+        });
+        $('pixelEditorDoneBtn')?.addEventListener('click', () => pixelResizeMenuToggle(false));
+        document.querySelectorAll('.pixelToolBtn').forEach((b) => {
+          b.addEventListener('click', () => pixelResizeMenuToggle(false));
+        });
+        // Preset buttons set BOTH inputs to the same square preset.
+        $('pixelResizePresets')?.addEventListener('click', (e) => {
+          const btn = e.target.closest('.pixelExportScaleBtn');
+          if (!btn) return;
+          const n = Math.max(4, Math.min(128, Number(btn.dataset.preset) | 0 || 32));
+          const wi = $('pixelResizeW'); if (wi) wi.value = n;
+          const hi = $('pixelResizeH'); if (hi) hi.value = n;
+        });
+        $('pixelResizeApplyBtn')?.addEventListener('click', () => {
+          const w = Number($('pixelResizeW')?.value) | 0;
+          const h = Number($('pixelResizeH')?.value) | 0;
+          pixelResize(w, h);
+          pixelResizeMenuToggle(false);
         });
       }
       document.querySelectorAll('.pixelToolBtn[data-ptool]').forEach((btn) => {
