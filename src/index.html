@@ -3429,12 +3429,16 @@
               <button type="button" class="pixelToolBtn" data-ptool="eraser" title="Eraser">⌫</button>
               <button type="button" class="pixelToolBtn" data-ptool="fill" title="Fill bucket">▣</button>
               <button type="button" class="pixelToolBtn" data-ptool="eyedropper" title="Pick colour">⊙</button>
+              <button type="button" class="pixelToolBtn" data-ptool="line" title="Line (L)">╱</button>
+              <button type="button" class="pixelToolBtn" data-ptool="rect" title="Rectangle (R)">□</button>
+              <button type="button" class="pixelToolBtn" data-ptool="ellipse" title="Ellipse (O)">○</button>
             </div>
             <button type="button" id="pixelUndoBtn" class="pixelBarBtn" title="Undo">↶</button>
             <span class="pixelBarDivider"></span>
             <label class="pixelBarToggle"><input type="checkbox" id="pixelGridToggle" checked /> Grid</label>
             <label class="pixelBarToggle"><input type="checkbox" id="pixelMirrorX" /> Mirror X</label>
             <label class="pixelBarToggle"><input type="checkbox" id="pixelMirrorY" /> Mirror Y</label>
+            <label class="pixelBarToggle" title="Filled rectangle / ellipse — when off, the shape tools draw an outline"><input type="checkbox" id="pixelShapeFill" /> Fill</label>
             <span class="pixelBarDivider"></span>
             <button type="button" id="pixelZoomOut" class="pixelBarBtn" title="Zoom out">−</button>
             <button type="button" id="pixelZoomIn" class="pixelBarBtn" title="Zoom in">+</button>
@@ -8618,8 +8622,8 @@
         current: Math.min(1, palette.length - 1),
         tool: 'pencil',
         zoom: 12,
-        gridOn: true, mirrorX: false, mirrorY: false,
-        undo: [], last: null
+        gridOn: true, mirrorX: false, mirrorY: false, shapeFill: false,
+        undo: [], last: null, shapeBackup: null, shapeStart: null
       };
       _pixelEditActive = true;
       document.body.classList.add('pixel-editing');
@@ -8758,6 +8762,58 @@
         if (e2 < dx) { err += dx; y0 += sy; }
       }
     }
+    function pixelDrawRect(x0, y0, x1, y1, idx, fill) {
+      const xMin = Math.min(x0, x1), xMax = Math.max(x0, x1);
+      const yMin = Math.min(y0, y1), yMax = Math.max(y0, y1);
+      if (fill) {
+        for (let y = yMin; y <= yMax; y++) {
+          for (let x = xMin; x <= xMax; x++) pixelPaintCell(x, y, idx);
+        }
+      } else {
+        for (let x = xMin; x <= xMax; x++) {
+          pixelPaintCell(x, yMin, idx);
+          pixelPaintCell(x, yMax, idx);
+        }
+        for (let y = yMin; y <= yMax; y++) {
+          pixelPaintCell(xMin, y, idx);
+          pixelPaintCell(xMax, y, idx);
+        }
+      }
+    }
+
+    function pixelDrawEllipse(x0, y0, x1, y1, idx, fill) {
+      const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+      const rx = Math.max(0.5, Math.abs(x1 - x0) / 2);
+      const ry = Math.max(0.5, Math.abs(y1 - y0) / 2);
+      const xMin = Math.min(x0, x1), xMax = Math.max(x0, x1);
+      const yMin = Math.min(y0, y1), yMax = Math.max(y0, y1);
+      const inside = (x, y) => {
+        const dx = (x - cx) / rx, dy = (y - cy) / ry;
+        return dx * dx + dy * dy <= 1;
+      };
+      if (fill) {
+        for (let y = yMin; y <= yMax; y++) {
+          for (let x = xMin; x <= xMax; x++) if (inside(x, y)) pixelPaintCell(x, y, idx);
+        }
+      } else {
+        // Outline: cells inside the ellipse with at least one outside 4-neighbour.
+        for (let y = yMin; y <= yMax; y++) {
+          for (let x = xMin; x <= xMax; x++) {
+            if (!inside(x, y)) continue;
+            if (!inside(x + 1, y) || !inside(x - 1, y) || !inside(x, y + 1) || !inside(x, y - 1)) {
+              pixelPaintCell(x, y, idx);
+            }
+          }
+        }
+      }
+    }
+
+    function pixelApplyShapeTool(tool, start, end, idx, fill) {
+      if (tool === 'line') pixelPaintLine(start.x, start.y, end.x, end.y, idx);
+      else if (tool === 'rect') pixelDrawRect(start.x, start.y, end.x, end.y, idx, fill);
+      else if (tool === 'ellipse') pixelDrawEllipse(start.x, start.y, end.x, end.y, idx, fill);
+    }
+
     function pixelFloodFill(x, y, idx) {
       const { w, h, indices } = _pixelEdit;
       const target = indices[y * w + x];
@@ -8786,6 +8842,20 @@
         pixelSnapshot();
         pixelFloodFill(cell.x, cell.y, _pixelEdit.current);
         renderPixelGrid();
+        return;
+      }
+      if (t === 'line' || t === 'rect' || t === 'ellipse') {
+        const idx = _pixelEdit.current;
+        if (isStart) {
+          pixelSnapshot();
+          _pixelEdit.shapeBackup = _pixelEdit.indices.slice();
+          _pixelEdit.shapeStart = { x: cell.x, y: cell.y };
+        }
+        if (_pixelEdit.shapeBackup && _pixelEdit.shapeStart) {
+          _pixelEdit.indices.set(_pixelEdit.shapeBackup);
+          pixelApplyShapeTool(t, _pixelEdit.shapeStart, cell, idx, !!_pixelEdit.shapeFill);
+          renderPixelGrid();
+        }
         return;
       }
       // pencil / eraser — drag-paint with line interpolation.
@@ -8875,8 +8945,8 @@
         standalone: true, layerId: null, w, h,
         indices: decodePixelRLE(frame, w, h), palette,
         current: Math.min(1, palette.length - 1),
-        tool: 'pencil', zoom: 12, gridOn: true, mirrorX: false, mirrorY: false,
-        undo: [], last: null
+        tool: 'pencil', zoom: 12, gridOn: true, mirrorX: false, mirrorY: false, shapeFill: false,
+        undo: [], last: null, shapeBackup: null, shapeStart: null
       };
       _pixelEditActive = true;
       pixelSyncToolButtons();
@@ -19044,6 +19114,7 @@
       });
       $('pixelMirrorX')?.addEventListener('change', (e) => { if (_pixelEdit) _pixelEdit.mirrorX = e.target.checked; });
       $('pixelMirrorY')?.addEventListener('change', (e) => { if (_pixelEdit) _pixelEdit.mirrorY = e.target.checked; });
+      $('pixelShapeFill')?.addEventListener('change', (e) => { if (_pixelEdit) _pixelEdit.shapeFill = e.target.checked; });
       // Sync the OS picker <-> hex text input <-> in-app HSV picker. The
       // in-app picker (Sat/Val square + Hue strip) is the reliable input
       // path; the other two are kept in sync purely for display / typing.
@@ -19207,7 +19278,11 @@
         });
         const _endPaint = () => {
           _painting = false;
-          if (_pixelEdit) _pixelEdit.last = null;
+          if (_pixelEdit) {
+            _pixelEdit.last = null;
+            _pixelEdit.shapeBackup = null;
+            _pixelEdit.shapeStart = null;
+          }
           pixelCommitIfStandalone();
         };
         _pgc.addEventListener('pointerup', _endPaint);
@@ -19219,7 +19294,7 @@
         if ((e.ctrlKey || e.metaKey) && k === 'z') { e.preventDefault(); e.stopPropagation(); pixelUndo(); }
         else if (k === 'escape' && _pixelEdit && !_pixelEdit.standalone) { e.preventDefault(); e.stopPropagation(); closePixelEditor(true); }
         else if (!e.ctrlKey && !e.metaKey && !isEditableFocus()) {
-          const map = { p: 'pencil', e: 'eraser', f: 'fill', i: 'eyedropper' };
+          const map = { p: 'pencil', e: 'eraser', f: 'fill', i: 'eyedropper', l: 'line', r: 'rect', o: 'ellipse' };
           if (map[k]) { e.preventDefault(); e.stopPropagation(); _pixelEdit.tool = map[k]; pixelSyncToolButtons(); }
         }
       }, true);
