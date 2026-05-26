@@ -55,6 +55,17 @@ toggle that fits the early-web aesthetic. Add new editor-UX items below.
   design they had tombstoned with a kind-5, warn that publishing will
   republish it.
 
+## Pixel art — future polish
+
+- **`pixelsB64` size-fallback encoder.** The spec calls for each frame
+  to store whichever is smaller: `pixels` (RLE pairs) or `pixelsB64`
+  (base64 of the raw `Uint8Array` of indices). Only RLE is implemented
+  today. For noisy / photo-pixelized content with many palette colours,
+  base64 is ~5× smaller — a 24-frame 64×64 sprite tested at 785 KB
+  RLE would drop to ~150 KB. Worth shipping alongside a live event-size
+  readout in the editor (soft warn at 50% of relay budget, hard block
+  at 90%) so users see the budget before publish.
+
 ## Drafted-but-unbuilt features
 
 Each has a full spec in `docs/`.
