@@ -3568,6 +3568,7 @@
               <button type="button" id="pixelPlayBtn" class="pixelBarBtn pixelTimelinePlayBtn" title="Play / stop (Space)">▶</button>
               <label class="pixelTimelineFps">FPS <input type="number" id="pixelFpsInput" min="1" max="60" step="1" value="8" /></label>
               <label class="pixelTimelineLoop"><input type="checkbox" id="pixelLoopToggle" checked /> Loop</label>
+              <label class="pixelTimelineLoop" title="Show prev / next frame at low opacity"><input type="checkbox" id="pixelOnionToggle" /> Onion</label>
               <div class="pixelTimelineFrameOps">
                 <button type="button" id="pixelFrameAddBtn" class="pixelBarBtn" title="Add blank frame">＋</button>
                 <button type="button" id="pixelFrameDupBtn" class="pixelBarBtn" title="Duplicate current frame">⎘</button>
@@ -8774,6 +8775,7 @@
         tool: 'pencil',
         zoom: 12,
         gridOn: true, mirrorX: false, mirrorY: false, shapeFill: false,
+        onionSkin: false,
         undo: [], redo: [], last: null, shapeBackup: null, shapeStart: null
       };
       _pixelEditActive = true;
@@ -8798,6 +8800,7 @@
       const dims = $('pixelEditorDims'); if (dims) dims.textContent = `${w} × ${h} px`;
       const fpsEl = $('pixelFpsInput'); if (fpsEl) fpsEl.value = _pixelEdit.fps;
       const loopEl = $('pixelLoopToggle'); if (loopEl) loopEl.checked = _pixelEdit.loop;
+      const onionEl = $('pixelOnionToggle'); if (onionEl) onionEl.checked = !!_pixelEdit.onionSkin;
       renderPixelPalette();
       renderPixelGrid();
       renderPixelTimeline();
@@ -8831,16 +8834,40 @@
       updateUndoRedoUI();
     }
 
+    // Draw one frame's filled cells in a single solid tint at the given alpha.
+    // Used by the onion-skin overlay — the tint discards the frame's actual
+    // palette colours so prev / next are immediately distinguishable from the
+    // editing frame (red = prev, blue = next, Aseprite convention).
+    function _pixelDrawOnionFrame(ctx, indices, w, h, zoom, palette, tint, alpha) {
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = tint;
+      for (let i = 0; i < indices.length; i++) {
+        const hex = palette[indices[i]];
+        if (!hex || pixelHexTransparent(hex)) continue;
+        ctx.fillRect((i % w) * zoom, ((i / w) | 0) * zoom, zoom, zoom);
+      }
+      ctx.restore();
+    }
+
     function renderPixelGrid(overrideIndices) {
       if (!_pixelEdit) return;
       const cv = $('pixelGridCanvas');
       if (!cv) return;
-      const { w, h, zoom, palette, gridOn } = _pixelEdit;
+      const { w, h, zoom, palette, gridOn, onionSkin, frames, currentFrame } = _pixelEdit;
       const indices = overrideIndices || _pixelEdit.indices;
       cv.width = w * zoom;
       cv.height = h * zoom;
       const ctx = cv.getContext('2d');
       ctx.clearRect(0, 0, cv.width, cv.height);
+      // Onion skin only while editing (not during playback) and only when
+      // there are neighbouring frames to show.
+      if (onionSkin && !overrideIndices && frames && frames.length > 1) {
+        if (currentFrame > 0)
+          _pixelDrawOnionFrame(ctx, frames[currentFrame - 1].indices, w, h, zoom, palette, '#ef4444', 0.3);
+        if (currentFrame < frames.length - 1)
+          _pixelDrawOnionFrame(ctx, frames[currentFrame + 1].indices, w, h, zoom, palette, '#3b82f6', 0.3);
+      }
       for (let i = 0; i < indices.length; i++) {
         const hex = palette[indices[i]];
         if (!hex || pixelHexTransparent(hex)) continue;
@@ -9532,6 +9559,7 @@
       const dims = $('pixelEditorDims'); if (dims) dims.textContent = `${w} × ${h} px`;
       const fpsEl = $('pixelFpsInput'); if (fpsEl) fpsEl.value = _pixelEdit.fps;
       const loopEl = $('pixelLoopToggle'); if (loopEl) loopEl.checked = _pixelEdit.loop;
+      const onionEl = $('pixelOnionToggle'); if (onionEl) onionEl.checked = !!_pixelEdit.onionSkin;
       renderPixelPalette();
       renderPixelGrid();
       renderPixelTimeline();
@@ -19748,6 +19776,11 @@
         if (!_pixelEdit) return;
         _pixelEdit.loop = !!e.target.checked;
         pixelCommitIfStandalone();
+      });
+      $('pixelOnionToggle')?.addEventListener('change', (e) => {
+        if (!_pixelEdit) return;
+        _pixelEdit.onionSkin = !!e.target.checked;
+        renderPixelGrid();
       });
       $('pixelFrameAddBtn')?.addEventListener('click', () => pixelFrameAdd());
       $('pixelFrameDupBtn')?.addEventListener('click', () => pixelFrameDuplicate());
