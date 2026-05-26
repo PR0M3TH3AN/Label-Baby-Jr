@@ -2138,6 +2138,23 @@
     .toolPaletteBtn:hover { background:rgba(127,127,127,.14); }
     .toolPaletteBtn.active { background:var(--accent); color:#fff; }
     .toolPaletteDivider { height:1px; background:var(--line); margin:3px 2px; }
+    .pixelToolWrap { position: relative; }
+    .pixelToolMenu {
+      position: absolute; left: calc(100% + 6px); top: 0; z-index: 40;
+      min-width: 220px; padding: 6px;
+      background: var(--panel, #fff); color: var(--ink);
+      border: 1px solid var(--line); border-radius: 8px;
+      box-shadow: 0 8px 24px rgba(15,23,42,.18);
+      flex-direction: column; gap: 2px;
+      display: none;
+    }
+    .pixelToolMenu.open { display: flex; }
+    .pixelToolMenu button {
+      text-align: left; padding: 8px 10px; font-size: .85rem;
+      border: 0; background: transparent; color: var(--ink);
+      border-radius: 6px; cursor: pointer; font-family: inherit;
+    }
+    .pixelToolMenu button:hover { background: rgba(127,127,127,.14); }
     .toolOptions {
       grid-area: options;
       display: flex;
@@ -3527,7 +3544,15 @@
           <button type="button" class="toolPaletteBtn" id="tool-pencil" data-tool="pencil" title="Pencil tool (B)" aria-label="Pencil tool">✎</button>
           <button type="button" class="toolPaletteBtn" id="tool-shape" data-tool="shape" title="Shape tool (S)" aria-label="Shape tool">▢</button>
           <button type="button" class="toolPaletteBtn" id="tool-text" data-tool="text" title="Text tool (T)" aria-label="Text tool">T</button>
-          <button type="button" class="toolPaletteBtn" id="tool-pixel" title="Add a pixel-art layer" aria-label="Pixel art layer">▦</button>
+          <div class="pixelToolWrap">
+            <button type="button" class="toolPaletteBtn" id="tool-pixel" title="Pixel art layer" aria-haspopup="true" aria-expanded="false" aria-label="Pixel art layer">▦</button>
+            <div id="pixelToolMenu" class="pixelToolMenu">
+              <button type="button" id="pixelAddBlankBtn">Add blank pixel-art layer</button>
+              <button type="button" id="pixelImportNostrBtn">Browse community…</button>
+              <button type="button" id="pixelImportFileBtn">Import from file…</button>
+            </div>
+            <input id="pixelImportFile" type="file" accept="application/json,.json" hidden />
+          </div>
           <button type="button" class="toolPaletteBtn" id="deckPresentBtn" title="Present this deck" aria-label="Present deck">▶</button>
         </div>
 
@@ -9031,6 +9056,110 @@
       };
       addLayer(layer);
       openPixelEditor(layer.id);
+    }
+
+    // Sanitize an arbitrary `pixelArt` blob (from file or community payload)
+    // into a safe, clamped shape we can drop into a new layer.
+    function sanitizePixelArtBlob(pa) {
+      if (!pa || typeof pa !== 'object') return null;
+      const w = Math.max(4, Math.min(128, pa.width | 0));
+      const h = Math.max(4, Math.min(128, pa.height | 0));
+      if (!w || !h) return null;
+      const palette = (Array.isArray(pa.palette) && pa.palette.length)
+        ? pa.palette.slice(0, 64).map(c => (typeof c === 'string' ? c : '#00000000'))
+        : DEFAULT_PIXEL_PALETTE.slice();
+      const srcFrame = (Array.isArray(pa.frames) && pa.frames[0]) ? pa.frames[0] : { pixels: [] };
+      // decode then re-encode so we own the buffer and catch corrupt RLE runs.
+      const indices = decodePixelRLE(srcFrame, w, h);
+      const pixels = encodePixelRLE(indices);
+      return { width: w, height: h, palette, frames: [{ id: 'f1', pixels }] };
+    }
+
+    function importPixelArtAsLayer(payload, targetOverride = '') {
+      if (!payload || typeof payload !== 'object') {
+        toastError('That file does not look like an Artstr Studio design.');
+        return false;
+      }
+      // Accept two shapes: a full design payload (with .pixelArt) OR a raw
+      // pixelArt blob (width/height/palette/frames).
+      const blob = (payload.pixelArt && typeof payload.pixelArt === 'object')
+        ? payload.pixelArt
+        : (payload.width && payload.height && Array.isArray(payload.frames) ? payload : null);
+      const pa = sanitizePixelArtBlob(blob);
+      if (!pa) {
+        toastError('No pixel art found in that design.');
+        return false;
+      }
+      const target = targetOverride || $('layerTarget')?.value || primaryTargetForMode(state.templateMode || 'cover');
+      const bounds = targetBounds(target);
+      applyTargetMode(target);
+      const size = Math.min(bounds.w, bounds.h) * 0.45;
+      pushHistory('import pixel art layer');
+      const layer = {
+        id: makeLayerId(),
+        type: 'pixelart',
+        name: payload?.meta?.title ? `Pixel art — ${payload.meta.title}` : 'Pixel art',
+        target,
+        x: bounds.x + (bounds.w - size) / 2,
+        y: bounds.y + (bounds.h - size) / 2,
+        w: size, h: size,
+        rotate: 0, opacity: 1, z: nextLayerZ(),
+        pixelArt: pa
+      };
+      addLayer(layer);
+      toastSuccess('Pixel art imported.');
+      return true;
+    }
+
+    function openPixelArtImportBrowser() {
+      state._pixelArtImportMode = true;
+      $('nostrType').value = 'pixelart';
+      _feedState.filterNew = 'pixelart';
+      _feedState.filterPopular = 'pixelart';
+      _feedState.filterSearch = 'pixelart';
+      _feedState.filterMine = 'pixelart';
+      $('nostrModal')?.classList.add('open');
+      if (typeof switchModalTab === 'function') switchModalTab('New');
+    }
+
+    // Intercept a community-browser selection while pixel-art import mode is
+    // active: drop the chosen design in as a pixelart layer instead of
+    // loading it as the current document.
+    function tryPixelArtImportRow(row) {
+      if (!state._pixelArtImportMode) return false;
+      state._pixelArtImportMode = false;
+      try { closeNostrPreview(); } catch (e) {}
+      $('nostrModal')?.classList.remove('open');
+      if (row && row.payload) importPixelArtAsLayer(row.payload);
+      return true;
+    }
+
+    function pixelImportFromFile() {
+      $('pixelImportFile')?.click();
+    }
+
+    function handlePixelImportFile(e) {
+      const file = e.target.files && e.target.files[0];
+      e.target.value = '';
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        let payload;
+        try { payload = JSON.parse(reader.result); }
+        catch (err) { toastError('Could not read that file as a design.'); return; }
+        importPixelArtAsLayer(payload);
+      };
+      reader.readAsText(file);
+    }
+
+    function pixelToolMenuToggle(forceOpen) {
+      const menu = $('pixelToolMenu');
+      const btn = $('tool-pixel');
+      if (!menu || !btn) return;
+      const isOpen = menu.classList.contains('open');
+      const willOpen = forceOpen !== undefined ? forceOpen : !isOpen;
+      menu.classList.toggle('open', willOpen);
+      btn.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
     }
 
     // Commit the standalone pixel editor's working grid into state.pixelArt.
@@ -16765,6 +16894,7 @@
         wall.appendChild(buildFeedCard(row, () => {
           if (tryDesignLayerImportRow(row)) return;
           if (tryDeckImportRow(row)) return;
+          if (tryPixelArtImportRow(row)) return;
           if (row.mode === 'disc-design') {
             const slotTarget = state._discImportTargetSlot;
             if (slotTarget) {
@@ -16815,6 +16945,7 @@
       const card = buildFeedCard(row, () => {
         if (tryDesignLayerImportRow(row)) return;
         if (tryDeckImportRow(row)) return;
+        if (tryPixelArtImportRow(row)) return;
         if (row.mode === 'disc-design') {
           const slotTarget = state._discImportTargetSlot;
           if (slotTarget) {
@@ -17187,6 +17318,7 @@
       if (!row?.payload) return;
       if (tryDesignLayerImportRow(row)) return;
       if (tryDeckImportRow(row)) return;
+      if (tryPixelArtImportRow(row)) return;
       if (row.mode === 'disc-design') {
         const slotTarget = state._discImportTargetSlot;
         if (slotTarget) {
@@ -18373,6 +18505,7 @@
         out.appendChild(buildResultCard(row, () => {
           if (tryDesignLayerImportRow(row)) return;
           if (tryDeckImportRow(row)) return;
+          if (tryPixelArtImportRow(row)) return;
           if (row.mode === 'disc-design') {
             const slotTarget = state._discImportTargetSlot;
             if (slotTarget) {
@@ -19235,7 +19368,44 @@
       $('deckPresentBtn')?.addEventListener('click', presentCurrentDeck);
 
       // ---- Pixel Editor wiring ----
-      $('tool-pixel')?.addEventListener('click', () => addPixelArtLayer());
+      // The `tool-pixel` palette button opens a small menu with three options:
+      // add a blank layer, browse the community for an existing design, or
+      // import a design from a local JSON file.
+      $('tool-pixel')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        pixelToolMenuToggle();
+      });
+      $('pixelAddBlankBtn')?.addEventListener('click', () => {
+        pixelToolMenuToggle(false);
+        addPixelArtLayer();
+      });
+      $('pixelImportNostrBtn')?.addEventListener('click', () => {
+        pixelToolMenuToggle(false);
+        openPixelArtImportBrowser();
+      });
+      $('pixelImportFileBtn')?.addEventListener('click', () => {
+        pixelToolMenuToggle(false);
+        pixelImportFromFile();
+      });
+      $('pixelImportFile')?.addEventListener('change', handlePixelImportFile);
+      // Outside-click and Escape dismiss the menu — mirrors the export-PNG
+      // menu pattern.
+      const _pixelToolMenuEl = $('pixelToolMenu');
+      const _pixelToolBtnEl = $('tool-pixel');
+      if (_pixelToolMenuEl && _pixelToolBtnEl) {
+        const _maybeClosePixelToolMenu = (ev) => {
+          if (!_pixelToolMenuEl.classList.contains('open')) return;
+          if (_pixelToolMenuEl.contains(ev.target) || _pixelToolBtnEl.contains(ev.target)) return;
+          pixelToolMenuToggle(false);
+        };
+        document.addEventListener('click', _maybeClosePixelToolMenu);
+        document.addEventListener('pointerdown', _maybeClosePixelToolMenu, true);
+        document.addEventListener('keydown', (ev) => {
+          if (ev.key === 'Escape' && _pixelToolMenuEl.classList.contains('open')) {
+            pixelToolMenuToggle(false);
+          }
+        });
+      }
       $('editPixelsBtn')?.addEventListener('click', () => {
         const l = selectedLayer();
         if (l && l.type === 'pixelart') openPixelEditor(l.id);
@@ -19671,7 +19841,7 @@
       $("designerCategoryField").addEventListener("change", (e)=>{pushHistory(`change category to ${e.target.value || 'Uncategorized'}`); state.meta.category=e.target.value; syncIdentifierVisibility(); render();});
       $("designerLanguageField").addEventListener("change", (e)=>{pushHistory('change language'); state.meta.language=e.target.value; render();});
 
-      $("nostrClose").addEventListener("click", () => { closeNostrPreview(); $("nostrModal").classList.remove("open"); _feedCache.softModRevealed.clear(); state._deckImportMode = false; state._designLayerImportTarget = ''; state._designLayerReplaceId = ''; });
+      $("nostrClose").addEventListener("click", () => { closeNostrPreview(); $("nostrModal").classList.remove("open"); _feedCache.softModRevealed.clear(); state._deckImportMode = false; state._pixelArtImportMode = false; state._designLayerImportTarget = ''; state._designLayerReplaceId = ''; });
       $("nostrRefreshBtn").addEventListener("click", async () => {
         const btn = $("nostrRefreshBtn");
         const original = btn.textContent;
