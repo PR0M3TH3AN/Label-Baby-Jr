@@ -14077,27 +14077,39 @@
           setTimeout(() => { delete el.dataset.dragMoved; }, 0);
         } else if (textTarget && wasSoleSelected) {
           // Click without drag on a text layer that was already the lone
-          // selection → drop into edit mode. Focus the contenteditable and
-          // place the caret at the click position so the user can start
-          // selecting / typing immediately. This is the standard "select
-          // once, click again to edit" pattern from PowerPoint / Keynote.
-          textTarget.focus();
+          // selection → drop into edit mode. Two subtleties:
+          // 1. The click event still has to fire on .freeLayer after this
+          //    pointerup, and that handler ends up clobbering the focus.
+          //    So defer with setTimeout(0) to run after the click chain.
+          // 2. The selection change may have triggered a re-render that
+          //    detaches the original textTarget. Look the layer's .textLayer
+          //    up by id when the deferred handler runs, so we always focus
+          //    the live DOM node and not a stale reference.
+          const layerId = layer.id;
           const cx = (upEvent && typeof upEvent.clientX === 'number') ? upEvent.clientX : startX;
           const cy = (upEvent && typeof upEvent.clientY === 'number') ? upEvent.clientY : startY;
-          try {
-            let range = null;
-            if (typeof document.caretRangeFromPoint === 'function') {
-              range = document.caretRangeFromPoint(cx, cy);
-            } else if (typeof document.caretPositionFromPoint === 'function') {
-              const pos = document.caretPositionFromPoint(cx, cy);
-              if (pos) { range = document.createRange(); range.setStart(pos.offsetNode, pos.offset); range.collapse(true); }
-            }
-            if (range) {
-              const sel = window.getSelection();
-              sel.removeAllRanges();
-              sel.addRange(range);
-            }
-          } catch (e) {}
+          setTimeout(() => {
+            const live = document.querySelector(`.freeLayer[data-layer-id="${layerId}"] .textLayer`);
+            if (!live) return;
+            live.focus();
+            try {
+              let range = null;
+              if (typeof document.caretRangeFromPoint === 'function') {
+                range = document.caretRangeFromPoint(cx, cy);
+              } else if (typeof document.caretPositionFromPoint === 'function') {
+                const pos = document.caretPositionFromPoint(cx, cy);
+                if (pos) { range = document.createRange(); range.setStart(pos.offsetNode, pos.offset); range.collapse(true); }
+              }
+              // Only use the caret position if it's inside the live editable
+              // — caretRangeFromPoint can return a position in the previous
+              // (now detached) .textLayer.
+              if (range && live.contains(range.startContainer)) {
+                const sel = window.getSelection();
+                sel.removeAllRanges();
+                sel.addRange(range);
+              }
+            } catch (e) {}
+          }, 0);
         }
         localStorage.setItem('case-cover-template-maker-autosave', JSON.stringify(state));
       };
