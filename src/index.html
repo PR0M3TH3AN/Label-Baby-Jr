@@ -18612,6 +18612,19 @@
         initInfiniteScroll(tab);
         const visibleRows = rows.slice(0, _feedPagination[tab].rendered);
         diffWallCards(wallEl, visibleRows, buildFeedCardForRow);
+        // Auto-fill the viewport on the initial render. appendFeedRows has
+        // a chained-RAF auto-fill for scroll-triggered loads but the
+        // initial render skipped it, so if the first chunk (24 cards)
+        // didn't reach the bottom of a tall modal, users had to nudge
+        // scroll to see the next chunk. Now we trigger the same fill
+        // chain once the new cards have laid out.
+        requestAnimationFrame(() => {
+          const scroller = wallEl.closest('.modalCard');
+          if (!scroller) return;
+          if (_feedPagination[tab].rendered >= rows.length) return;
+          if (scroller.scrollHeight > scroller.clientHeight + 40) return;
+          appendFeedRows(tab);
+        });
       };
 
       _currentFeedRerender = rerender;
