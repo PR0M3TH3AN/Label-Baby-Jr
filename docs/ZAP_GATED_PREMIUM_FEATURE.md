@@ -43,7 +43,7 @@ There is no creator-only fallback path.
 The phases build on each other. Each has an explicit ship gate so
 work can be paused between phases for review.
 
-### Phase 0 — Crypto bundle  *(~2–3h)*
+### Phase 0 — Crypto bundle  *(~3–5h)*
 
 The existing codebase signs/encrypts only via `window.nostr.*` (the
 user's NIP-07 extension). NWC requires signing kind-23194 events with
@@ -69,12 +69,22 @@ keys → produces the test-vector ciphertext.
 **Protocol summary (NIP-47)**
 The wallet exposes a connection URI:
 ```
-nostr+walletconnect://<wallet-service-pubkey>?relay=<wss-url>&secret=<hex>
+nostr+walletconnect://<wallet-service-pubkey>?relay=<wss-url>&secret=<hex>[&lud16=<addr>]
 ```
-- `wallet-service-pubkey` — the wallet's NIP-47 service pubkey.
-- `relay` — a dedicated relay both ends listen on.
+- `wallet-service-pubkey` — the wallet's NIP-47 service pubkey (hex).
+- `relay` — a dedicated relay both ends listen on. May appear MORE than
+  once; we publish/subscribe on all of them for redundancy.
 - `secret` — a 32-byte hex privkey that the client uses to sign
-  requests (this is NOT the user's identity key).
+  requests (this is NOT the user's identity key). May be URL-encoded.
+- `lud16` — optional Lightning address some wallets (incl. CoinOS)
+  include for convenience; we cache it but don't depend on it.
+
+**Capability discovery (kind-13194)**
+The wallet publishes a kind-13194 "info" event listing supported
+methods (e.g. `pay_invoice get_balance get_info lookup_invoice`).
+On connect we subscribe to that event and verify `pay_invoice` is in
+the list — otherwise we surface "This wallet doesn't support
+payments via NWC" before the user is allowed to proceed.
 
 **Request lifecycle**
 1. Build a kind-23194 event:
@@ -89,11 +99,18 @@ nostr+walletconnect://<wallet-service-pubkey>?relay=<wss-url>&secret=<hex>
    or `{ "error": { "code": "...", "message": "..." } }`.
 
 **Deliverables**
-- `parseNwcUri(uri)` → `{ servicePubkey, relay, secret }` or null.
-- `nwcConnect(uri)` — store creds, open WS, send a `get_info` ping to
-  verify the wallet responds.
-- `nwcPayInvoice(bolt11, { timeoutMs, hintMsats })` → resolves to
-  `{ preimage }` or rejects with `{ code, message }`.
+- `parseNwcUri(uri)` → `{ servicePubkey, relays[], secret, lud16? }` or
+  null. Handles multiple `relay` params and URL-encoded secrets.
+- `nwcConnect(uri)` — store creds, open WS to each relay, fetch the
+  kind-13194 capability list, send a `get_info` request to retrieve
+  the wallet's alias + pubkey.
+- `nwcPayInvoice(bolt11, { timeoutMs })` → resolves to
+  `{ preimage }` or rejects with `{ code, message }`. Common codes
+  worth special-casing: `INSUFFICIENT_BALANCE`,
+  `QUOTA_EXCEEDED` / `BUDGET_EXCEEDED` (wallet's per-connection cap
+  hit), `PAYMENT_FAILED`, `NOT_FOUND` (invoice mistyped), `INTERNAL`.
+- `nwcLookupInvoice(paymentHash)` → returns settlement state. Used
+  during retry of a half-failed unlock so we never double-pay.
 - Credentials live in `localStorage` under
   `casewrap-nwc-connection` (single-record; new paste replaces old).
   Trade-off acknowledged in the threat-model section.
@@ -116,23 +133,36 @@ A new "Wallet" section in the Community settings, two-state:
 ```
 
 The CoinOS button opens a short modal:
-> **1.** Visit [coinos.io](https://coinos.io) and sign up.
-> **2.** Open *Settings → Wallet Connect*.
-> **3.** Copy the connection string (`nostr+walletconnect://…`).
-> **4.** Paste below.
+> **1.** Sign up at [coinos.io](https://coinos.io) (no install).
+> **2.** Open the [Wallet Connect](https://coinos.io/settings/connect)
+>        page directly, or browse to *Settings → Connect → Nostr Wallet
+>        Connect*.
+> **3.** Set a budget that comfortably covers the unlocks you expect
+>        — at least a few thousand sats. *(Hint inline.)*
+> **4.** Copy the connection string (`nostr+walletconnect://…`).
+> **5.** Paste below.
 > *[input]* *[Connect]*
 
 The "Paste connection string" disclosure expands to the same input
 with no per-wallet instructions — works for Alby Hub, Mutiny,
 Phoenix, Cashu.me, Boltz, etc.
 
+**Mobile note:** on a phone, the user copies the NWC URI from their
+wallet app (Alby Go, Mutiny, Cashu.me's "Connect" share sheet, etc.)
+and pastes into this same field. We don't try to detect / deep-link.
+
 *Connected:*
 ```
 ┌────────────────────────────────────────────┐
-│  ⚡ Connected to <walletDomain or short>    │
+│  ⚡ Connected to <wallet alias from         │
+│     get_info, fall back: "Connected wallet">│
 │  Last test: <time>  [Test] [Disconnect]    │
 └────────────────────────────────────────────┘
 ```
+
+If the wallet's kind-13194 info event does NOT list `pay_invoice`,
+we show a non-dismissable warning under the alias: *"This wallet
+doesn't support payments via NWC — unlocks will fail."*
 
 **Ship gate**
 With CoinOS-issued URI: `get_info` returns the wallet's alias.
@@ -159,23 +189,42 @@ const PLATFORM_FEE_BPS = 3000;  // 30%. Adjust to lower the cut.
   remainder (creator gets the extra millisat-equivalent — slightly
   creator-favouring, which feels right).
 - `payZapSplit({ creatorPubkey, creatorMetadata, eventId, totalSats })`
-  → orchestrates two zap requests in sequence:
-  1. Build + sign kind-9734 to creator for `creatorSats`.
-  2. Fetch creator's bolt11 via existing `fetchLnurlInvoice`.
-  3. Pay creator via `nwcPayInvoice`.
-  4. Build + sign kind-9734 to platform for `platformSats`.
-  5. Fetch platform's bolt11.
-  6. Pay platform via `nwcPayInvoice`.
-  7. Await both kind-9735 receipts on relays
-     (reuse existing `startTipPaymentWatch` pattern).
-  Returns `{ creatorReceipt, platformReceipt }` or throws with the
-  failure stage so the UI can show a precise error.
+  → orchestrates the two zaps, parallelizing every step we safely can:
+  1. **Resolve in parallel**: creator's LNURL endpoint + platform's
+     LNURL endpoint (from the cached platform `lud16`). Also at this
+     step: validate each LNURL's `minSendable` ≤ that side's msat
+     share; bail with a clear error if either fails.
+  2. **Sign in parallel**: build both kind-9734 zap requests,
+     `Promise.all(window.nostr.signEvent(...))` for both. The user's
+     NIP-07 extension may prompt twice back-to-back, but they're
+     queued in the same gesture rather than minutes apart.
+  3. **Fetch in parallel**: `Promise.all(fetchLnurlInvoice(...))` for
+     both bolt11s.
+  4. **Pay creator first**, then platform (sequential — see "Why
+     creator first" below).
+  5. Mark unlocked as soon as the `pay_invoice` preimages return
+     successfully — the preimage is cryptographic proof of payment
+     (it hashes to the bolt11's payment hash). DO NOT block UX on
+     kind-9735 receipt arrival; receipts are async verification that
+     surface in a future "zap history" view.
+  6. Subscribe to both kind-9735 receipts in the background and
+     persist them once they arrive, for later auditability.
+  Returns `{ creatorPreimage, platformPreimage }` (sync) and resolves
+  to receipt ids later (async); throws with the failure stage so the
+  UI can show a precise error.
 
 **Why creator first, platform second:** if the creator leg succeeds
 and the platform leg fails, the creator at least got paid; we surface
 "Retry platform share" to the user. The reverse ordering would mean
 a half-failed unlock paid the platform but not the creator, which is
 the worst possible state.
+
+**Retry protection (double-spend).** Before paying either leg on a
+retry, call `nwcLookupInvoice(paymentHash)` to see if the wallet
+already settled it. If so, skip that leg and reuse the preimage from
+the lookup response. Persist the bolt11 + paymentHash in
+`PARTIAL_UNLOCK_KEY` (Phase 4) so retries across page reloads can
+also do this check.
 
 **Ship gate**
 Unit-test the split math on edge cases (1 sat → 0/1; 100 sats @ 3000
@@ -201,15 +250,40 @@ We add `state.publish.zapGate` (boolean) and `state.publish.zapMin`
 - Inline note: "Of every unlock, the creator receives 70 sats and the
   Artstr platform receives 30 sats (30% fee)." Numbers re-render
   from the user's input + the fee constant.
-- Pre-publish check: creator must have a `lud16` in their kind-0; if
-  not, block with "Set a Lightning address in your Nostr profile
-  before publishing a premium template."
+- **Pre-publish checks (all blocking)**:
+  - Creator's kind-0 has a `lud16`. Block with "Set a Lightning
+    address in your Nostr profile before publishing a premium
+    template."
+  - Creator's LNURL `minSendable` ≤ creator's split share. Block with
+    "Your Lightning provider requires a minimum of M sats per payment;
+    raise your unlock price to at least N sats." (computed from
+    `creatorMin / (1 - bps/10000)`).
+  - Platform `lud16` resolved successfully, and its `minSendable` ≤
+    platform's split share. Same logic, different recipient. (Very
+    unlikely to fail in practice but we check defensively.)
 
 **Feed card** — when `isZapGated(event)`:
 - Replace the Import button with a ⚡ "Unlock for N sats" card.
 - The card preview still renders (already does in feed); only the
   CTA changes.
 - If `isUnlockedLocally(event.id)` → show normal Import.
+
+**Relay fast-path (the "already paid" check).** Zap receipts live on
+relays forever. Before charging the user (or even showing the lock),
+once per session, batch-query
+`{ kinds: [9735], '#e': [<all gated event ids in feed>], '#P': [<myPubkey>] }`
+and locally mark every event with a matching receipt as unlocked.
+This means:
+- A user who cleared `localStorage` (cache wipe / new browser /
+  private window) is restored to "unlocked" automatically — no
+  re-payment, no manual recovery.
+- Cross-device unlock works for free.
+- A half-failed unlock that eventually settled mid-flow gets
+  detected as fully unlocked next session.
+
+If a matching receipt exists for the creator leg but NOT the
+platform leg, surface "Resume unlock — platform share still owed"
+instead of either Import or full Lock.
 
 **Unlock flow** (when the lock card is clicked):
 1. If NWC not connected → open the wallet setup modal first.
@@ -237,12 +311,16 @@ Receipt ids are kept so a future "Show my zap history" view can
 reconstruct the unlock log.
 
 **Ship gate**
-Publish a premium template from account A. From account B, open the
-feed, click the lock, complete the unlock, see the Import button,
-import the template. Reload the page → import is still unlocked
-(cache survives). Manually clear the cache key in DevTools → lock
-returns; second unlock works without re-paying (uses the cached
-zap receipts to fast-path verification before paying — see "Idempotency").
+1. Publish a premium template from account A.
+2. From account B, open the feed, click the lock, complete the
+   unlock, see the Import button, import the template.
+3. Reload the page → import is still unlocked (localStorage cache).
+4. Manually clear the cache key in DevTools, then reload → the relay
+   fast-path finds the existing kind-9735 receipts and restores the
+   unlock without re-paying.
+5. Open the same feed in a fresh private-window tab signed in as the
+   same account B → same outcome (cross-device unlock via relay
+   fast-path).
 
 ---
 
@@ -255,25 +333,53 @@ zap receipts to fast-path verification before paying — see "Idempotency").
   surfaced as a retry-able error.
 - Platform invoice fails (e.g. node offline): "Creator was paid;
   retry the platform share." Retry-only button reuses the existing
-  creator receipt.
+  creator preimage; no double-charge.
 - Creator has no `lud16`: blocked at publish time (already in Phase
   3), and on the consumer side blocked at unlock time with a clear
   "Creator can't receive payments yet" message.
+- Creator's LNURL `minSendable` > their share at the chosen
+  `zap-min`: blocked at publish time with a corrective hint.
+- Wallet budget exhausted (`QUOTA_EXCEEDED`/`BUDGET_EXCEEDED`):
+  "Your wallet's NWC budget is used up — raise it in your wallet's
+  settings, then retry."
+- Wallet doesn't support `pay_invoice` (capability list missing it):
+  flagged at connect time; lock card shows "Connected wallet can't
+  pay — connect a different wallet."
 - NWC not configured on consumer side: redirect to wallet setup.
 - Two consumers unlocking the same template simultaneously: each
   unlock is independent; both succeed.
+- Cache wipe / new device: relay fast-path restores unlocked status
+  without re-payment.
 
 **Idempotency / re-attempt**
-Track which legs paid via `localStorage`:
+Track every leg's bolt11 + payment hash + preimage (if known) via
+`localStorage`:
 ```js
 const PARTIAL_UNLOCK_KEY = 'casewrap-partial-unlocks';
-// shape: { [eventId]: { creatorReceiptId?, platformReceiptId? } }
+// shape: {
+//   [eventId]: {
+//     creator?: { bolt11, paymentHash, preimage? },
+//     platform?: { bolt11, paymentHash, preimage? },
+//     startedAt
+//   }
+// }
 ```
-On retry after partial failure, skip already-paid legs.
+
+On any retry — same session or a future session — first call
+`nwcLookupInvoice(paymentHash)` for each leg whose `preimage` is
+missing; if the wallet says it's settled, update the cache and skip
+the pay step. Only then proceed to pay any genuinely-unpaid leg.
+
+When the user opens the app and there's any record in
+`PARTIAL_UNLOCK_KEY` older than a few minutes, surface a top-bar
+banner: *"You have an unfinished unlock for «N» templates — [Resume]
+[Discard]."* This prevents the user from forgetting a half-paid
+unlock indefinitely.
 
 **Ship gate**
-Every test-matrix row passes by hand on the deployed staging build,
-with screenshots attached to the PR.
+Every test-matrix row passes by hand on a deployed staging URL.
+Results documented in the corresponding commit message (this repo
+pushes straight to main; no PR workflow).
 
 ---
 
@@ -301,6 +407,10 @@ Already in the codebase from the existing LNURL tip flow:
 | Platform npub kind-0 lookup fails | Retry on next attempt; cache the resolved `lud16` for the session. If still failing after retries, the unlock errors out — no creator-only fallback (matches the "split is mandatory" goal). |
 | Replay an old zap receipt to fake an unlock | Receipts must reference the specific template's event id (`#e`) AND the sender pubkey matches the local user. Old receipts for other events are rejected. |
 | NWC secret exfiltration via XSS | Same risk surface as the NIP-07 extension key. Acknowledged. The secret lives in `localStorage` (not session-only) so reconnect doesn't require re-pasting. |
+| Platform pubkey exposed in every premium-unlock receipt on public relays | Intentional — receipts ARE the revenue audit trail. Worth noting because if we ever switch to a "stealth" revenue model this assumption changes. |
+| Wallet budget exhausted mid-flow (creator paid, platform fails on budget) | Detected by NWC error code; surfaced as a precise retry prompt ("raise budget, then retry platform share"). Creator preimage is preserved so the retry only pays the platform leg. |
+| Wallet returns a successful preimage but the LSP never publishes the kind-9735 receipt | Preimage IS proof; we unlock locally. Receipt is async verification only. Other clients querying the relay won't see this user as a "verified zapper" but that's a cosmetic concern, not a correctness one. |
+| Receipt fast-path returns a forged event | Relays don't sign events themselves — the kind-9735 receipt must be signed by the LSP's zapper pubkey advertised in the LNURL response. We verify the signature + the `bolt11` tag matches a legitimate invoice for the event id. (Same verification the existing tip flow does.) |
 
 ---
 
@@ -310,8 +420,16 @@ Already in the codebase from the existing LNURL tip flow:
   model (e.g. 10% above 10k-sat unlocks) once usage data shows
   whether high-value unlocks are common. Single-constant design today
   makes this a one-line edit.
+- **Pay-above-minimum unlocks.** v1 locks the paid amount to exactly
+  `zap-min` (still split 70/30). A future polish would allow the
+  user to pay extra — bonus goes entirely to the creator (no extra
+  platform cut on the tip portion). Encourages support without
+  feeling like price-gouging.
 - **Receiving-side NWC.** Out of scope here. If we ever want creators
   to *receive* via NWC instead of LNURL, that's a separate spec.
 - **General zaps via NWC.** Existing tip flow still shows bolt11/QR.
   Migrating that to NWC once it's wired here is a small follow-up
   (4–5h, reuses everything Phases 0–2 build).
+- **Currency display.** All amounts are in sats. Showing live USD/EUR
+  next to the sats price would help creators set sensible prices, but
+  introduces an FX dependency. Deferred.
