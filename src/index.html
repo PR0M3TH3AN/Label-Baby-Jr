@@ -2692,6 +2692,26 @@
     body.dark .layoutTab.active, body.dark button.primary { color:#fff; }
     .sheetWrap{margin:0 auto;}
   </style>
+  <!--
+    Bundled @noble/secp256k1 + @noble/hashes subset. Used by the NWC
+    (NIP-47) wallet client — that flow needs schnorr signing + secp256k1
+    ECDH with the NWC connection's secret key (not the user's identity
+    key), which window.nostr can't do. Exposes `window.ArtstrNoble`.
+
+    To rebuild after a noble upgrade:
+      cd /tmp && mkdir -p noble-fetch && cd noble-fetch
+      npm init -y
+      npm install @noble/secp256k1@<v> @noble/hashes@<v>
+      cat > entry.js <<'EOF'
+        import { schnorr, getPublicKey, getSharedSecret, utils as secpUtils } from '@noble/secp256k1';
+        import { sha256 } from '@noble/hashes/sha2.js';
+        import { hexToBytes, bytesToHex, randomBytes } from '@noble/hashes/utils.js';
+        window.ArtstrNoble = { schnorr, getPublicKey, getSharedSecret, sha256, hexToBytes, bytesToHex, randomBytes, secpUtils };
+      EOF
+      npx esbuild entry.js --bundle --format=iife --minify --target=es2020 --outfile=noble-bundle.min.js
+      cp noble-bundle.min.js <repo>/src/
+  -->
+  <script src="noble-bundle.min.js"></script>
 </head>
 <body>
   <div class="nostrWidget" id="nostrWidget">
@@ -4386,6 +4406,147 @@
     const $ = (id) => document.getElementById(id);
     const safe$ = (id) => { try { return $(id); } catch { return null; } };
     const on = (id, type, fn) => { const el = $(id); if (el) el.addEventListener(type, fn); };
+
+    // ---- NWC crypto (Phase 0) ------------------------------------------------
+    // The NIP-47 (Nostr Wallet Connect) flow signs / encrypts as a *different*
+    // pubkey than the user's identity — the NWC URI carries its own secret key.
+    // window.nostr can only operate on the user's identity, so we need a
+    // bundled secp256k1 + NIP-04 implementation. The bundle (noble-bundle.min.js,
+    // loaded above) provides schnorr + ECDH + sha256; we layer NIP-04 (AES-256
+    // -CBC via crypto.subtle) and a tiny event-signing helper on top.
+    const NWC = (() => {
+      const N = () => window.ArtstrNoble;
+
+      const utf8ToBytes = (s) => new TextEncoder().encode(s);
+      const bytesToUtf8 = (b) => new TextDecoder().decode(b);
+      const bytesToBase64 = (b) => {
+        let s = ''; for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);
+        return btoa(s);
+      };
+      const base64ToBytes = (b64) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      const hexToBytes = (h) => N().hexToBytes(h);
+      const bytesToHex = (b) => N().bytesToHex(b);
+
+      // NIP-04: shared secret is the 32-byte X coord of ECDH(priv, pub).
+      // noble's getSharedSecret returns a 33-byte compressed point — slice the
+      // 02/03 prefix off.
+      function sharedSecret(privHex, pubHex) {
+        const priv = hexToBytes(privHex);
+        // Pub on the wire is x-only (32 bytes). secp256k1 wants the full point;
+        // prepend 02 to lift the x to the even-Y point on the curve.
+        let pub;
+        if (pubHex.length === 64) pub = hexToBytes('02' + pubHex);
+        else if (pubHex.length === 66) pub = hexToBytes(pubHex);
+        else throw new Error('sharedSecret: pubkey must be 32 or 33 bytes hex');
+        const compressed = N().getSharedSecret(priv, pub);
+        return compressed.slice(1, 33);
+      }
+
+      // NIP-04 encrypt: AES-256-CBC with PKCS#7 padding (Web Crypto default),
+      // 16-byte random IV. Output: `<base64(ct)>?iv=<base64(iv)>`.
+      async function encrypt04(privHex, peerPubHex, plaintext) {
+        const key = await crypto.subtle.importKey(
+          'raw', sharedSecret(privHex, peerPubHex),
+          { name: 'AES-CBC' }, false, ['encrypt']
+        );
+        const iv = crypto.getRandomValues(new Uint8Array(16));
+        const ct = new Uint8Array(await crypto.subtle.encrypt(
+          { name: 'AES-CBC', iv }, key, utf8ToBytes(plaintext)
+        ));
+        return bytesToBase64(ct) + '?iv=' + bytesToBase64(iv);
+      }
+
+      async function decrypt04(privHex, peerPubHex, content) {
+        const [ctB64, ivPart] = String(content).split('?iv=');
+        if (!ctB64 || !ivPart) throw new Error('decrypt04: malformed NIP-04 payload');
+        const key = await crypto.subtle.importKey(
+          'raw', sharedSecret(privHex, peerPubHex),
+          { name: 'AES-CBC' }, false, ['decrypt']
+        );
+        const pt = new Uint8Array(await crypto.subtle.decrypt(
+          { name: 'AES-CBC', iv: base64ToBytes(ivPart) }, key, base64ToBytes(ctB64)
+        ));
+        return bytesToUtf8(pt);
+      }
+
+      // NIP-01 event id = sha256(serialized([0, pubkey, created_at, kind, tags, content]))
+      function getEventHash(event) {
+        const serial = JSON.stringify([
+          0, event.pubkey, event.created_at, event.kind, event.tags || [], event.content || ''
+        ]);
+        return bytesToHex(N().sha256(utf8ToBytes(serial)));
+      }
+
+      // Sign an event with a hex privkey (NOT the user's identity key — this
+      // is for NWC's wallet-side keypair). Returns the event with id + sig + pubkey.
+      function signEventWithKey(event, privHex) {
+        const priv = hexToBytes(privHex);
+        const pubkey = bytesToHex(N().schnorr.getPublicKey(priv));
+        const draft = { ...event, pubkey, tags: event.tags || [], content: event.content || '' };
+        const id = getEventHash(draft);
+        const sig = bytesToHex(N().schnorr.sign(hexToBytes(id), priv));
+        return { ...draft, id, sig };
+      }
+
+      // Verify a Nostr event signature. Used for relay-fast-path receipt
+      // verification later in Phase 3.
+      function verifyEvent(event) {
+        try {
+          if (!event?.id || !event?.sig || !event?.pubkey) return false;
+          if (getEventHash(event) !== event.id) return false;
+          return N().schnorr.verify(hexToBytes(event.sig), hexToBytes(event.id), hexToBytes(event.pubkey));
+        } catch { return false; }
+      }
+
+      // Derive the schnorr x-only pubkey for a hex privkey.
+      function getPubkeyHex(privHex) {
+        return bytesToHex(N().schnorr.getPublicKey(hexToBytes(privHex)));
+      }
+
+      return {
+        utf8ToBytes, bytesToUtf8, bytesToBase64, base64ToBytes,
+        hexToBytes, bytesToHex,
+        sharedSecret, encrypt04, decrypt04,
+        getEventHash, signEventWithKey, verifyEvent, getPubkeyHex,
+      };
+    })();
+
+    // Phase-0 self-test (runs once at load). BIP-340 test vector index 1 for
+    // schnorr signing + a NIP-04 round-trip. Logs a single warning if anything
+    // breaks; silent on success so we don't spam the console for everyone.
+    (async () => {
+      try {
+        if (!window.ArtstrNoble) throw new Error('noble bundle did not load');
+        // BIP-340 test vector #1 (from bitcoin/bips bip-0340/test-vectors.csv).
+        const tvPriv = 'B7E151628AED2A6ABF7158809CF4F3C762E7160F38B4DA56A784D9045190CFEF';
+        const tvPub  = 'DFF1D77F2A671C5F36183726DB2341BE58FEAE1DA2DECED843240F7B502BA659';
+        const tvMsg  = '243F6A8885A308D313198A2E03707344A4093822299F31D0082EFA98EC4E6C89';
+        const tvSig  = '6896BD60EEAE296DB48A229FF71DFE071BDE413E6D43F917DC8DCF8C78DE33418906D11AC976ABCCB20B091292BFF4EA897EFCB639EA871CFA95F6DE339E4B0A';
+        const derivedPub = NWC.getPubkeyHex(tvPriv);
+        if (derivedPub.toUpperCase() !== tvPub) throw new Error('schnorr pubkey mismatch');
+        const okSig = window.ArtstrNoble.schnorr.verify(
+          NWC.hexToBytes(tvSig), NWC.hexToBytes(tvMsg), NWC.hexToBytes(tvPub)
+        );
+        if (!okSig) throw new Error('schnorr.verify failed on BIP-340 test vector');
+        // NIP-04 round-trip: encrypt + decrypt with two random keypairs.
+        const aPriv = NWC.bytesToHex(window.ArtstrNoble.randomBytes(32));
+        const bPriv = NWC.bytesToHex(window.ArtstrNoble.randomBytes(32));
+        const aPub  = NWC.getPubkeyHex(aPriv);
+        const bPub  = NWC.getPubkeyHex(bPriv);
+        const msg = 'NIP-04 round-trip — Artstr NWC self-test ✓';
+        const ct = await NWC.encrypt04(aPriv, bPub, msg);
+        const pt = await NWC.decrypt04(bPriv, aPub, ct);
+        if (pt !== msg) throw new Error('NIP-04 round-trip mismatch');
+        // Sign + verify a synthetic Nostr event using a random key.
+        const ev = { kind: 1, created_at: Math.floor(Date.now() / 1000), tags: [], content: 'hello' };
+        const signed = NWC.signEventWithKey(ev, aPriv);
+        if (!NWC.verifyEvent(signed)) throw new Error('verifyEvent failed on signed event');
+      } catch (err) {
+        console.warn('[Artstr] Crypto self-test failed — NWC features will not work:', err);
+      }
+    })();
+    // ---- end NWC crypto -----------------------------------------------------
+
 
     // In-app toast — replaces all uses of native toastError(). Default type is
     // 'info'; use toastError / toastSuccess for the common severity flavors.
