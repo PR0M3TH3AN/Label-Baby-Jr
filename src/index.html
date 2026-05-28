@@ -18806,7 +18806,12 @@
       $('tipCustomInput').style.display = 'none';
       $('tipCustomInput').value = '';
       const getBtn = $('tipGetInvoiceBtn');
-      if (getBtn) { getBtn.disabled = true; getBtn.textContent = 'Get invoice'; }
+      if (getBtn) {
+        getBtn.disabled = true;
+        // When a wallet is connected, the button pays in-app directly. When
+        // not, it falls back to the original LNURL → bolt11 QR flow.
+        getBtn.textContent = nwc.isConnected() ? '⚡ Send tip' : 'Get invoice';
+      }
       // Clear any active selection
       $('tipAmounts').querySelectorAll('button').forEach(b => b.classList.remove('active'));
 
@@ -18857,6 +18862,7 @@
       if (!_tipTarget) return;
       let sats = _tipSelectedSats;
       if (sats <= 0) { if (errEl) errEl.textContent = 'Pick an amount first.'; return; }
+      const wasOriginalLabel = nwc.isConnected() ? '⚡ Send tip' : 'Get invoice';
 
       try {
         if (getBtn) { getBtn.disabled = true; getBtn.textContent = 'Fetching…'; }
@@ -18866,7 +18872,7 @@
         const maxSats = Math.floor((meta.maxSendable || 100000000) / 1000);
         if (sats < minSats || sats > maxSats) {
           if (errEl) errEl.textContent = `Enter between ${minSats} and ${maxSats.toLocaleString()} sats.`;
-          if (getBtn) { getBtn.disabled = false; getBtn.textContent = 'Get invoice'; }
+          if (getBtn) { getBtn.disabled = false; getBtn.textContent = wasOriginalLabel; }
           return;
         }
         const msats = sats * 1000;
@@ -18874,6 +18880,27 @@
         const zap = await tryZapPath(meta, _tipTarget.targetEvent, msats);
         const issuedAt = Math.floor(Date.now() / 1000);
         const bolt11 = await fetchLnurlInvoice(meta.callback, msats, zap ? { nostr: zap.encoded } : {});
+
+        // NWC-first: if a wallet is connected, try to pay the invoice in-app.
+        // Falls back to the bolt11/QR view on any failure so the user still has
+        // a way to settle the tip externally.
+        if (nwc.isConnected()) {
+          if (getBtn) getBtn.textContent = 'Paying…';
+          try {
+            const result = await nwc.payInvoice(bolt11);
+            if (result?.preimage) {
+              const tracked = !!zap;
+              toastSuccess(`Sent ${sats.toLocaleString()} sats${tracked ? ' ⚡' : ''}`);
+              closeTipModal();
+              return;
+            }
+            // No preimage returned — treat as failure and surface the QR.
+          } catch (err) {
+            // Show the failure inline + still display the bolt11 so the user
+            // can pay externally.
+            if (errEl) errEl.textContent = `Wallet error: ${err?.message || err}. Falling back to invoice.`;
+          }
+        }
 
         // If we took the zap path, watch for the kind-9735 receipt and auto-close on success.
         let watch = null;
@@ -18891,7 +18918,7 @@
         showTipInvoiceView(bolt11, sats, !!zap, watch);
       } catch (err) {
         if (errEl) errEl.textContent = String(err?.message || err);
-        if (getBtn) { getBtn.disabled = false; getBtn.textContent = 'Get invoice'; }
+        if (getBtn) { getBtn.disabled = false; getBtn.textContent = wasOriginalLabel; }
       }
     }
 
