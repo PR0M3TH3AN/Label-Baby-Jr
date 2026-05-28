@@ -4103,6 +4103,39 @@
           <span>Blur cards that ≥2 people you follow have muted or reported. Click <em>Show anyway</em> to reveal.</span>
         </label>
       </details>
+      <details id="walletDetails" style="margin-top:12px;border-top:1px solid var(--line);padding-top:10px">
+        <summary style="font-weight:700;font-size:.82rem;cursor:pointer;color:var(--muted)">⚡ Lightning wallet <span id="walletStatusBadge" style="font-weight:500;color:var(--muted);font-size:.74rem;margin-left:6px"></span></summary>
+        <div id="walletDisconnectedView">
+          <p class="hint" style="margin:8px 0 6px">Connect a NIP-47 wallet to unlock premium templates. Recommended: <strong>CoinOS</strong> — free, web-based, no install.</p>
+          <ol class="hint" style="margin:0 0 8px 18px;padding:0;line-height:1.55">
+            <li>Sign up at <a href="https://coinos.io" target="_blank" rel="noopener">coinos.io</a>.</li>
+            <li>Open <a href="https://coinos.io/settings/connect" target="_blank" rel="noopener">Settings → Connect</a> and create a Nostr Wallet Connect link. Set a budget that comfortably covers the unlocks you expect (a few thousand sats is plenty).</li>
+            <li>Copy the connection string and paste below.</li>
+          </ol>
+          <p class="hint" style="margin:6px 0 4px;font-size:.74rem">Any NIP-47 wallet works (Alby Hub, Mutiny, Phoenix, Cashu.me, etc.). On mobile, copy the URI from your wallet app and paste here.</p>
+          <input id="walletNwcInput" type="text" placeholder="nostr+walletconnect://…" style="display:block;width:100%;margin-top:6px;font-family:ui-monospace,SFMono-Regular,monospace;font-size:.74rem" />
+          <div class="buttonRow" style="margin:8px 0 0">
+            <button type="button" id="walletConnectBtn" class="primary">Connect</button>
+            <button type="button" id="walletPasteBtn" title="Paste from clipboard">Paste</button>
+          </div>
+          <p class="hint" id="walletConnectStatus" style="margin:8px 0 0;min-height:1.2em;color:var(--muted)"></p>
+        </div>
+        <div id="walletConnectedView" style="display:none">
+          <div style="display:flex;align-items:center;gap:10px;margin-top:8px;flex-wrap:wrap">
+            <span style="font-size:1.05rem">⚡</span>
+            <div style="flex:1;min-width:0">
+              <div style="font-weight:650;font-size:.85rem" id="walletAliasLabel">Connected wallet</div>
+              <div class="hint" style="font-size:.72rem;margin:2px 0 0" id="walletDetailLine"></div>
+            </div>
+          </div>
+          <p class="hint" id="walletCapabilityWarning" style="display:none;margin:8px 0 0;color:#b45309">⚠ This wallet doesn't advertise <code>pay_invoice</code>; unlocks will fail.</p>
+          <div class="buttonRow" style="margin:8px 0 0">
+            <button type="button" id="walletTestBtn">Test connection</button>
+            <button type="button" id="walletDisconnectBtn">Disconnect</button>
+          </div>
+          <p class="hint" id="walletTestStatus" style="margin:8px 0 0;min-height:1.2em;color:var(--muted)"></p>
+        </div>
+      </details>
     </div>
   </div>
 
@@ -4546,6 +4579,379 @@
       }
     })();
     // ---- end NWC crypto -----------------------------------------------------
+
+
+    // ---- NWC client (Phase 1) ----------------------------------------------
+    // RPC-style client for a single NIP-47 wallet connection. One WebSocket,
+    // one persistent subscription for kind-23195 responses + kind-13194
+    // capability info. Used by the zap-gated unlock flow. Persists creds in
+    // localStorage so the user only pastes the connection string once.
+    const NWC_STORAGE_KEY = 'casewrap-nwc-connection';
+    const NWC_DEFAULT_TIMEOUT_MS = 25000;
+    const nwc = (() => {
+      let _conn = null;         // { servicePubkey, relays, secret, clientPubkey, lud16 } once connected
+      let _ws = null;           // active WebSocket
+      let _connectedRelay = ''; // which relay we're currently connected to
+      let _subId = '';
+      let _capabilities = null; // Set of method names
+      let _info = null;         // { alias, color, pubkey, ... } from get_info
+      let _lastTestAt = 0;
+      let _pending = new Map(); // requestEventId → { resolve, reject, timer, method }
+      let _listeners = new Set();
+
+      function on(fn) { _listeners.add(fn); return () => _listeners.delete(fn); }
+      function _emit() { for (const fn of _listeners) try { fn(); } catch {} }
+
+      // Parse `nostr+walletconnect://<hex-pubkey>?relay=<wss>&secret=<hex>[&lud16=...]`.
+      // Returns { servicePubkey, relays: [...], secret, lud16 } or null.
+      function parseNwcUri(uri) {
+        try {
+          if (typeof uri !== 'string') return null;
+          const trimmed = uri.trim();
+          // Accept both `nostr+walletconnect:` and `nostrwalletconnect:` (some
+          // wallets emit the latter).
+          const m = trimmed.match(/^nostr(?:\+|)walletconnect:\/\/([0-9a-fA-F]{64})\?(.+)$/);
+          if (!m) return null;
+          const servicePubkey = m[1].toLowerCase();
+          const params = new URLSearchParams(m[2]);
+          const relays = params.getAll('relay').filter(Boolean);
+          if (!relays.length) return null;
+          const secret = (params.get('secret') || '').toLowerCase();
+          if (!/^[0-9a-f]{64}$/.test(secret)) return null;
+          const lud16 = params.get('lud16') || '';
+          return { servicePubkey, relays, secret, lud16 };
+        } catch { return null; }
+      }
+
+      function isConnected() { return !!_conn && _ws && _ws.readyState === WebSocket.OPEN; }
+      function getConn() { return _conn; }
+      function getInfo() { return _info; }
+      function getCapabilities() { return _capabilities ? new Set(_capabilities) : null; }
+      function getLastTestAt() { return _lastTestAt; }
+
+      function _persist() {
+        try {
+          if (!_conn) localStorage.removeItem(NWC_STORAGE_KEY);
+          else localStorage.setItem(NWC_STORAGE_KEY, JSON.stringify({
+            servicePubkey: _conn.servicePubkey,
+            relays: _conn.relays,
+            secret: _conn.secret,
+            lud16: _conn.lud16,
+            info: _info, capabilities: _capabilities ? [..._capabilities] : null,
+            lastTestAt: _lastTestAt,
+          }));
+        } catch (err) { console.warn('[nwc] persist failed', err); }
+      }
+
+      function loadFromStorage() {
+        try {
+          const raw = localStorage.getItem(NWC_STORAGE_KEY);
+          if (!raw) return false;
+          const data = JSON.parse(raw);
+          if (!data?.servicePubkey || !data?.secret || !Array.isArray(data?.relays)) return false;
+          _conn = {
+            servicePubkey: data.servicePubkey,
+            relays: data.relays, secret: data.secret, lud16: data.lud16 || '',
+            clientPubkey: NWC.getPubkeyHex(data.secret),
+          };
+          _info = data.info || null;
+          _capabilities = data.capabilities ? new Set(data.capabilities) : null;
+          _lastTestAt = Number(data.lastTestAt) || 0;
+          _openSocket(); // best-effort reopen; UI shows the in-flight state
+          return true;
+        } catch { return false; }
+      }
+
+      function _resetSocket() {
+        if (_ws) { try { _ws.close(); } catch {} }
+        _ws = null;
+        _connectedRelay = '';
+        // Reject all in-flight requests so the UI can recover.
+        for (const [, p] of _pending) {
+          clearTimeout(p.timer);
+          p.reject(new Error('NWC connection closed'));
+        }
+        _pending.clear();
+        _emit();
+      }
+
+      function _openSocket() {
+        if (!_conn) return;
+        if (_ws && (_ws.readyState === WebSocket.OPEN || _ws.readyState === WebSocket.CONNECTING)) return;
+        // Try the first relay; if it errors we'll cycle on next request.
+        const relay = _conn.relays[0];
+        _connectedRelay = relay;
+        _subId = 'nwc-' + Math.random().toString(36).slice(2, 10);
+        let ws;
+        try { ws = new WebSocket(relay); } catch (err) { console.warn('[nwc] WS open failed', err); return; }
+        _ws = ws;
+        ws.onopen = () => {
+          // Subscribe to: our responses + the wallet's capability info event.
+          const respFilter = { kinds: [23195], '#p': [_conn.clientPubkey] };
+          const infoFilter = { kinds: [13194], authors: [_conn.servicePubkey] };
+          ws.send(JSON.stringify(['REQ', _subId + '-r', respFilter]));
+          ws.send(JSON.stringify(['REQ', _subId + '-i', infoFilter]));
+          _emit();
+        };
+        ws.onmessage = (msg) => _handleRelayMessage(msg.data);
+        ws.onerror = (err) => console.warn('[nwc] WS error', err);
+        ws.onclose = () => _resetSocket();
+      }
+
+      function _handleRelayMessage(raw) {
+        let frame;
+        try { frame = JSON.parse(raw); } catch { return; }
+        if (!Array.isArray(frame) || !frame.length) return;
+        const [type] = frame;
+        if (type === 'EVENT') {
+          const event = frame[2];
+          if (!event) return;
+          if (event.kind === 13194) _handleInfoEvent(event);
+          else if (event.kind === 23195) _handleResponseEvent(event);
+        } else if (type === 'NOTICE') {
+          console.warn('[nwc] relay NOTICE:', frame[1]);
+        } else if (type === 'OK') {
+          // OK is the relay's ack for our request publish. We don't need to act
+          // on it; if accepted: false, the in-flight request will time out and
+          // surface a useful error.
+        }
+      }
+
+      function _handleInfoEvent(event) {
+        // kind-13194 content is a space-separated list of supported methods.
+        const methods = String(event.content || '').trim().split(/\s+/).filter(Boolean);
+        _capabilities = new Set(methods);
+        _persist();
+        _emit();
+      }
+
+      async function _handleResponseEvent(event) {
+        try {
+          if (!NWC.verifyEvent(event)) return; // ignore forged events
+          // Match via the `e` tag (request id we sent).
+          const eTag = (event.tags || []).find((t) => t[0] === 'e');
+          if (!eTag || !eTag[1]) return;
+          const pending = _pending.get(eTag[1]);
+          if (!pending) return;
+          const ptext = await NWC.decrypt04(_conn.secret, event.pubkey, event.content);
+          let body;
+          try { body = JSON.parse(ptext); } catch { return; }
+          clearTimeout(pending.timer);
+          _pending.delete(eTag[1]);
+          if (body.error) pending.reject(Object.assign(new Error(body.error.message || body.error.code || 'NWC error'), { code: body.error.code }));
+          else pending.resolve(body.result);
+        } catch (err) { console.warn('[nwc] response decrypt failed', err); }
+      }
+
+      async function _request(method, params, { timeoutMs = NWC_DEFAULT_TIMEOUT_MS } = {}) {
+        if (!_conn) throw Object.assign(new Error('No NWC wallet connected'), { code: 'NOT_CONNECTED' });
+        if (!_ws || _ws.readyState !== WebSocket.OPEN) {
+          _openSocket();
+          // Brief wait for the socket to open.
+          const opened = await new Promise((resolve) => {
+            const start = Date.now();
+            const tick = () => {
+              if (_ws && _ws.readyState === WebSocket.OPEN) return resolve(true);
+              if (Date.now() - start > 4000) return resolve(false);
+              setTimeout(tick, 100);
+            };
+            tick();
+          });
+          if (!opened) throw Object.assign(new Error('NWC wallet relay unreachable'), { code: 'RELAY_UNREACHABLE' });
+        }
+        const content = await NWC.encrypt04(_conn.secret, _conn.servicePubkey, JSON.stringify({ method, params }));
+        const reqEvent = NWC.signEventWithKey({
+          kind: 23194,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [['p', _conn.servicePubkey]],
+          content,
+        }, _conn.secret);
+        return new Promise((resolve, reject) => {
+          const timer = setTimeout(() => {
+            _pending.delete(reqEvent.id);
+            reject(Object.assign(new Error(`NWC ${method} timed out`), { code: 'TIMEOUT' }));
+          }, timeoutMs);
+          _pending.set(reqEvent.id, { resolve, reject, timer, method });
+          try { _ws.send(JSON.stringify(['EVENT', reqEvent])); } catch (err) {
+            clearTimeout(timer);
+            _pending.delete(reqEvent.id);
+            reject(Object.assign(new Error('NWC publish failed'), { code: 'PUBLISH_FAILED', cause: err }));
+          }
+        });
+      }
+
+      async function connect(uri) {
+        const parsed = parseNwcUri(uri);
+        if (!parsed) throw new Error('That doesn’t look like a NIP-47 connection string (nostr+walletconnect://…).');
+        _resetSocket();
+        _conn = { ...parsed, clientPubkey: NWC.getPubkeyHex(parsed.secret) };
+        _info = null; _capabilities = null;
+        _openSocket();
+        // Give the relay a moment to deliver the kind-13194 info event.
+        await new Promise((r) => setTimeout(r, 800));
+        // Issue get_info to fetch alias + node pubkey (separate from
+        // capabilities; some wallets only return the runtime info via this
+        // call).
+        try {
+          const info = await _request('get_info', {}, { timeoutMs: 6000 });
+          _info = info || null;
+        } catch (err) {
+          // get_info is optional in older NWC implementations. Don't fail
+          // connect on its account — capability-event subscription often still
+          // delivered, and pay_invoice would still work.
+          console.warn('[nwc] get_info failed (continuing):', err);
+        }
+        _lastTestAt = Date.now();
+        _persist();
+        _emit();
+        return { info: _info, capabilities: _capabilities ? [..._capabilities] : [] };
+      }
+
+      function disconnect() {
+        _resetSocket();
+        _conn = null; _info = null; _capabilities = null; _lastTestAt = 0;
+        _persist();
+        _emit();
+      }
+
+      async function payInvoice(bolt11) {
+        return _request('pay_invoice', { invoice: bolt11 });
+      }
+
+      async function lookupInvoice(paymentHash) {
+        return _request('lookup_invoice', { payment_hash: paymentHash });
+      }
+
+      async function getInfoFresh() {
+        const info = await _request('get_info', {}, { timeoutMs: 6000 });
+        _info = info || null; _lastTestAt = Date.now(); _persist(); _emit();
+        return info;
+      }
+
+      return {
+        parseNwcUri, connect, disconnect, isConnected, getConn, getInfo,
+        getCapabilities, getLastTestAt, on, loadFromStorage,
+        payInvoice, lookupInvoice, getInfoFresh,
+      };
+    })();
+    // ---- end NWC client -----------------------------------------------------
+
+
+    // ---- Wallet settings UI (Phase 1) --------------------------------------
+    // Renders the disconnected/connected state of the Wallet panel inside the
+    // Nostr modal and wires every button. Subscribes to nwc.on() so any state
+    // change (background reconnect, Test result, etc.) re-renders immediately.
+    const walletUI = (() => {
+      function formatRelativeTime(ts) {
+        if (!ts) return '';
+        const delta = Math.max(0, Date.now() - ts);
+        if (delta < 60_000) return 'just now';
+        if (delta < 3_600_000) return `${Math.floor(delta / 60_000)} min ago`;
+        if (delta < 86_400_000) return `${Math.floor(delta / 3_600_000)} h ago`;
+        return `${Math.floor(delta / 86_400_000)} d ago`;
+      }
+
+      function render() {
+        const conn = nwc.getConn();
+        const info = nwc.getInfo();
+        const caps = nwc.getCapabilities();
+        const lastTestAt = nwc.getLastTestAt();
+        const dis = $('walletDisconnectedView');
+        const con = $('walletConnectedView');
+        const badge = $('walletStatusBadge');
+        if (!conn) {
+          if (dis) dis.style.display = '';
+          if (con) con.style.display = 'none';
+          if (badge) badge.textContent = '— not connected';
+          return;
+        }
+        if (dis) dis.style.display = 'none';
+        if (con) con.style.display = '';
+        const alias = info?.alias || info?.name || 'Connected wallet';
+        const aliasEl = $('walletAliasLabel');
+        if (aliasEl) aliasEl.textContent = alias;
+        const detailLine = [];
+        if (conn.lud16) detailLine.push(conn.lud16);
+        else if (info?.pubkey) detailLine.push(info.pubkey.slice(0, 8) + '…' + info.pubkey.slice(-4));
+        detailLine.push(`Tested ${formatRelativeTime(lastTestAt) || 'never'}`);
+        const detailEl = $('walletDetailLine');
+        if (detailEl) detailEl.textContent = detailLine.join(' · ');
+        if (badge) badge.textContent = '— ' + alias;
+        const warn = $('walletCapabilityWarning');
+        if (warn) warn.style.display = (caps && !caps.has('pay_invoice')) ? '' : 'none';
+      }
+
+      async function handleConnect() {
+        const input = $('walletNwcInput');
+        const statusEl = $('walletConnectStatus');
+        const btn = $('walletConnectBtn');
+        const uri = (input?.value || '').trim();
+        if (!uri) { if (statusEl) statusEl.textContent = 'Paste a connection string first.'; return; }
+        if (btn) { btn.disabled = true; btn.textContent = 'Connecting…'; }
+        if (statusEl) statusEl.textContent = 'Opening wallet relay…';
+        try {
+          await nwc.connect(uri);
+          if (input) input.value = '';
+          if (statusEl) statusEl.textContent = '';
+          toastSuccess('Lightning wallet connected.');
+        } catch (err) {
+          if (statusEl) statusEl.textContent = err?.message || 'Connection failed.';
+        } finally {
+          if (btn) { btn.disabled = false; btn.textContent = 'Connect'; }
+          render();
+        }
+      }
+
+      async function handleTest() {
+        const statusEl = $('walletTestStatus');
+        const btn = $('walletTestBtn');
+        if (btn) { btn.disabled = true; btn.textContent = 'Testing…'; }
+        if (statusEl) statusEl.textContent = '';
+        try {
+          await nwc.getInfoFresh();
+          if (statusEl) statusEl.textContent = 'Wallet responded ✓';
+        } catch (err) {
+          if (statusEl) statusEl.textContent = `Test failed: ${err?.message || 'unknown error'}`;
+        } finally {
+          if (btn) { btn.disabled = false; btn.textContent = 'Test connection'; }
+          render();
+        }
+      }
+
+      function handleDisconnect() {
+        nwc.disconnect();
+        toast('Wallet disconnected.');
+        render();
+      }
+
+      async function handlePaste() {
+        try {
+          const text = await navigator.clipboard.readText();
+          const input = $('walletNwcInput');
+          if (input && text) {
+            input.value = text.trim();
+            input.focus();
+          }
+        } catch {
+          toast('Clipboard read blocked — paste manually with ⌘V / Ctrl+V.');
+        }
+      }
+
+      function init() {
+        // Restore stored creds; client will best-effort reopen the WS.
+        nwc.loadFromStorage();
+        on('walletConnectBtn', 'click', handleConnect);
+        on('walletPasteBtn',   'click', handlePaste);
+        on('walletTestBtn',    'click', handleTest);
+        on('walletDisconnectBtn', 'click', handleDisconnect);
+        on('walletNwcInput', 'keydown', (e) => { if (e.key === 'Enter') handleConnect(); });
+        nwc.on(render);
+        render();
+      }
+
+      return { init, render };
+    })();
+    // ---- end Wallet settings UI --------------------------------------------
 
 
     // In-app toast — replaces all uses of native toastError(). Default type is
@@ -23134,6 +23540,7 @@
           refreshCommunityView();
         });
       }
+      try { walletUI.init(); } catch (err) { console.warn('[wallet] init failed', err); }
       const shareId = parseShareIdFromLocation();
       if (shareId) {
         // dismiss welcome if it would block the preview
