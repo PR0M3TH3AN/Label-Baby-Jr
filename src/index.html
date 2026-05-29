@@ -17332,7 +17332,30 @@
       if (mode === 'disc') return renderDiscSheetToExportCanvas(dpi);
       if (mode === 'jewel') return renderJewelSheetToExportCanvas(dpi);
       if (mode === 'customart' || mode === 'slide') return renderCustomArtToExportCanvas(dpi);
+      if (mode === 'pixelart') return renderPixelArtToExportCanvas();
       throw new Error(`Premium preview not supported for mode "${mode}".`);
+    }
+
+    // Render the standalone pixel-art design (state.pixelArt frame 0) into
+    // a canvas suitable for the premium watermarked preview. Native pixel
+    // dimensions are tiny (32-128 px), so scale up by the largest integer
+    // factor that keeps the long axis ≤ the preview target — with nearest-
+    // neighbor so the pixels stay crisp instead of blurring into mush.
+    async function renderPixelArtToExportCanvas() {
+      const pa = state.pixelArt || (typeof defaultPixelArt === 'function' ? defaultPixelArt(32, 32) : { width: 32, height: 32, frames: [], palette: [] });
+      const native = renderPixelGridToCanvas(pa, 0);
+      const targetLong = PREMIUM_PREVIEW.MAX_LONG_AXIS_PX;
+      const longest = Math.max(native.width, native.height);
+      const scale = Math.max(1, Math.floor(targetLong / longest));
+      const canvas = document.createElement('canvas');
+      canvas.width = native.width * scale;
+      canvas.height = native.height * scale;
+      const ctx = canvas.getContext('2d');
+      ctx.imageSmoothingEnabled = false;  // crisp pixelated upscale
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(native, 0, 0, canvas.width, canvas.height);
+      return canvas;
     }
 
     function _drawPremiumWatermark(ctx, w, h) {
