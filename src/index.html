@@ -4363,6 +4363,10 @@
             <input type="number" id="publishConfirmZapMin" min="10" step="1" value="100" style="width:90px" />
           </label>
           <p id="publishConfirmSplitNote" class="hint" style="margin:0;font-size:.74rem"></p>
+          <label style="display:flex;align-items:flex-start;gap:6px;margin:8px 0 0;font-size:.74rem;cursor:pointer">
+            <input type="checkbox" id="publishConfirmSoftGateAck" style="margin-top:2px" />
+            <span>I understand this is a <strong>static soft-gate, not strong DRM</strong>. A determined buyer can extract / re-share the design after unlocking. Artstr protects against drive-by scraping, not piracy.</span>
+          </label>
           <p id="publishConfirmZapGateError" class="hint" style="display:none;margin:6px 0 0;color:var(--warn);font-size:.76rem"></p>
         </div>
       </div>
@@ -5643,7 +5647,8 @@
       const ok = confirm(
         `Unlock "${row.title || '(untitled)'}" for ${min} sats?\n\n` +
         `• Creator (${shortPubkey(row.e.pubkey)}): ${creatorSats} sats\n` +
-        `• Artstr platform fee: ${platformSats} sats (${(PLATFORM_FEE_BPS / 100).toFixed(0)}%)`
+        `• Artstr platform fee: ${platformSats} sats (${(PLATFORM_FEE_BPS / 100).toFixed(0)}%)\n\n` +
+        `Soft-gate, not strong DRM — once unlocked you can save / export / share the design like any other Artstr file.`
       );
       if (!ok) return;
       // Live status line; reuses the toast system for simplicity.
@@ -17862,6 +17867,11 @@
       toggle.checked = !!pub.zapGate;
       minInput.value = Math.max(10, Math.floor(Number(pub.zapMin) || 100));
       details.style.display = toggle.checked ? '' : 'none';
+      // Soft-gate ack always resets to unchecked on each modal open — we
+      // want the creator to acknowledge it deliberately every time, not
+      // accidentally inherit it from a previous publish.
+      const ack = $('publishConfirmSoftGateAck');
+      if (ack) ack.checked = false;
       // Update split note + validate.
       const min = Math.max(10, Math.floor(Number(minInput.value) || 100));
       const { creatorSats, platformSats } = platform.splitZapAmount(min);
@@ -17960,6 +17970,15 @@
         const lud06 = state.community?.myProfile?.lud06 || '';
         if (!lud16 && !lud06) {
           if (errEl) { errEl.textContent = 'Add a Lightning address (lud16) to your Nostr profile, or turn off Premium.'; errEl.style.display = ''; }
+          if (btn) { btn.disabled = false; btn.textContent = 'Publish'; }
+          return;
+        }
+        // PREMIUM_DESIGNS_FEATURE.md §9.1 — creator must acknowledge that
+        // this is a soft-gate, not strong DRM. The checkbox lives in the
+        // premium-details panel; we hard-block publish without it.
+        const ack = $('publishConfirmSoftGateAck');
+        if (ack && !ack.checked) {
+          if (errEl) { errEl.textContent = 'Tick the soft-gate acknowledgement above before publishing a premium design.'; errEl.style.display = ''; }
           if (btn) { btn.disabled = false; btn.textContent = 'Publish'; }
           return;
         }
