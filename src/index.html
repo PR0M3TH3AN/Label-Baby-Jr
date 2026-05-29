@@ -2113,6 +2113,15 @@
       background-image:linear-gradient(var(--panel),var(--panel)),linear-gradient(135deg,#ffd166 0%,#ef476f 50%,#06d6a0 100%);
     }
     .feedCard.feedCardPremium:hover{box-shadow:0 0 0 1px rgba(239,71,111,.20), 0 6px 22px rgba(239,71,111,.18)}
+    /* Reveal animation when a premium design switches from locked to
+       unlocked inside the preview pane — fades the new content in over the
+       watermark with a subtle scale. */
+    @keyframes premiumRevealFade {
+      0%   { opacity: 0; transform: scale(.985); filter: brightness(1.04); }
+      60%  { opacity: 1; transform: none;        filter: brightness(1.04); }
+      100% { opacity: 1; transform: none;        filter: none; }
+    }
+    .premiumRevealFlash { animation: premiumRevealFade .55s ease-out; }
     .feedCardPremiumRibbon{
       position:absolute;top:6px;left:6px;z-index:7;
       font-size:.62rem;font-weight:800;letter-spacing:.04em;
@@ -5708,6 +5717,30 @@
         // Re-render the feed in place — the card will now show Import.
         if (typeof _currentFeedRerender === 'function') {
           try { _currentFeedRerender(); } catch {}
+        }
+        // If the user opened the preview pane for THIS design before clicking
+        // unlock, refresh the pane to show the decrypted preview (instead of
+        // the watermarked locked version) and flash the reveal animation.
+        try {
+          const previewedRow = $('nostrPreviewPanel')?._row;
+          if (previewedRow?.e?.id === eventId) {
+            const freshEvent = (_feedCache.events || []).find((ev) => ev.id === eventId) || row.e;
+            const freshRows = buildRowsFromEvents([freshEvent], 'any', '', true);
+            const freshRow = freshRows[0] || row;
+            // openDesignPreview wipes #nostrPreviewPanel; refresh from the
+            // updated cache state.
+            openDesignPreview(freshRow);
+            const panel = $('nostrPreviewPanel');
+            if (panel) {
+              panel.classList.remove('premiumRevealFlash');
+              // Force reflow so the animation re-triggers if it had been
+              // applied previously.
+              void panel.offsetWidth;
+              panel.classList.add('premiumRevealFlash');
+            }
+          }
+        } catch (refreshErr) {
+          console.warn('[unlock] preview refresh failed', refreshErr);
         }
       } catch (err) {
         if (statusToast?.dismiss) statusToast.dismiss();
