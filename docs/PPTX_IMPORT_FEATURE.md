@@ -731,7 +731,7 @@ Acceptance: Image-bearing decks import with placeholder layers at
 correct positions; chart / SmartArt / table / video objects show as
 labeled placeholders; nothing silently disappears.
 
-### Phase 4: Basic Shape Import
+### Phase 4: Basic Shape Import — SHIPPED on `pptx-import` (commit `3def41b`)
 
 - Parse `p:sp` with `a:prstGeom` and no text body.
 - Map common preset shapes (rect, roundRect, ellipse, triangle, line,
@@ -741,6 +741,12 @@ labeled placeholders; nothing silently disappears.
 
 Acceptance: Basic preset shapes import as editable shape layers; fill
 and stroke colors roughly match the PowerPoint file.
+
+Status: shipped (intentionally landed before Phase 2 / Phase 3 because
+the user's test deck is a design-template set, heavy on
+backgrounds + shapes and light on text). Verified against
+`gallery_template_layout_set.pptx` (16 slides → 64 shape layers with
+correct source colors and positions, zero warnings).
 
 ### Phase 5: Group Flattening
 
