@@ -5787,6 +5787,33 @@
       throw new Error('No NIP-44 / NIP-04 decrypt available.');
     }
 
+    // Anything over this and we split the vault into per-item events. Picked
+    // to give comfortable margin under the ~64 KB content limit common on
+    // popular relays (Damus, nos.lol, snort), accounting for tag overhead +
+    // NIP-44 inflation on top of the JSON.
+    const VAULT_SIZE_THRESHOLD = 40 * 1024;
+
+    function _vaultItemDTag(addressCoord) {
+      const bytes = window.ArtstrNoble.sha256(new TextEncoder().encode(addressCoord || ''));
+      // base64url (no padding) — fits cleanly in a d-tag value.
+      let s = ''; for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+      return 'artstr:purchase:' + btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    }
+
+    // Stub of an item suitable for the manifest (split mode). Drops the big
+    // fields — the per-item event carries those.
+    function _vaultItemStub(item) {
+      return {
+        a: item.a,
+        eventId: item.eventId,
+        creatorPubkey: item.creatorPubkey,
+        title: item.title,
+        mode: item.mode,
+        unlockedAt: item.unlockedAt,
+        amountSats: item.amountSats,
+      };
+    }
+
     async function loadPurchaseVault({ force = false } = {}) {
       if (!force && _vaultCache) return _vaultCache;
       if (_vaultLoadPromise) return _vaultLoadPromise;
@@ -5809,9 +5836,41 @@
           catch (err) { console.warn('[vault] decrypt failed', err); _vaultCache = { v: 1, updatedAt: 0, items: [] }; return _vaultCache; }
           let parsed;
           try { parsed = JSON.parse(plaintext); } catch { parsed = null; }
-          _vaultCache = parsed?.items
-            ? { v: parsed.v || 1, updatedAt: parsed.updatedAt || latest.created_at * 1000, items: parsed.items }
-            : { v: 1, updatedAt: 0, items: [] };
+          if (!parsed?.items) { _vaultCache = { v: 1, updatedAt: 0, items: [] }; return _vaultCache; }
+          // Split mode: index carries stubs only; fetch per-item events and
+          // merge their payloads onto the stubs. Stubs without a matching
+          // per-item event still appear in the list (titles + amounts) but
+          // can't be opened — surface that case in the UI as a missing entry.
+          if (parsed.split === true) {
+            const dTagByStub = parsed.items.map((it) => ({ stub: it, dTag: _vaultItemDTag(it.a) }));
+            const itemEvents = dTagByStub.length
+              ? await queryRelays(relays, {
+                  kinds: [30078], authors: [myPubkey],
+                  '#d': dTagByStub.map((p) => p.dTag), limit: dTagByStub.length + 10,
+                }, { timeoutMs: 4500 })
+              : [];
+            const itemByDTag = new Map();
+            for (const ev of itemEvents || []) {
+              const dt = (ev.tags || []).find((t) => t[0] === 'd')?.[1];
+              if (dt) itemByDTag.set(dt, ev);
+            }
+            const fullItems = [];
+            for (const { stub, dTag } of dTagByStub) {
+              const ev = itemByDTag.get(dTag);
+              if (!ev) { fullItems.push({ ...stub, _missing: true }); continue; }
+              try {
+                const itemPlain = JSON.parse(await _selfDecrypt(ev.content));
+                if (itemPlain?.item?.a === stub.a) fullItems.push({ ...stub, ...itemPlain.item });
+                else fullItems.push({ ...stub, _missing: true });
+              } catch (e) {
+                console.warn('[vault] per-item decrypt failed', e);
+                fullItems.push({ ...stub, _missing: true });
+              }
+            }
+            _vaultCache = { v: parsed.v || 1, updatedAt: parsed.updatedAt || latest.created_at * 1000, items: fullItems };
+          } else {
+            _vaultCache = { v: parsed.v || 1, updatedAt: parsed.updatedAt || latest.created_at * 1000, items: parsed.items };
+          }
           return _vaultCache;
         } finally { _vaultLoadPromise = null; }
       })();
@@ -5849,20 +5908,58 @@
       return [...byA.values()].sort((a, b) => (b.unlockedAt || 0) - (a.unlockedAt || 0));
     }
 
-    async function _publishVault(vault) {
-      const plaintext = JSON.stringify(vault);
+    async function _publishVaultEvent(plaintext, dTag, extraTags = []) {
       const content = await _selfEncrypt(plaintext);
       const evt = {
         kind: 30078,
         created_at: Math.floor(Date.now() / 1000),
         tags: [
-          ['d', VAULT_D_TAG],
+          ['d', dTag],
           ['client', 'Artstr Studio'],
           ['encrypted', nostrEncryptCapability() || 'nip44'],
+          ...extraTags,
         ],
         content,
       };
-      const signed = await publishCommunityEvent(evt);
+      return { signed: await publishCommunityEvent(evt), encryptedSize: content.length };
+    }
+
+    // Publish the full vault. Tries single-event first; if encrypted size
+    // would risk relay rejection, splits into per-item events + a small
+    // manifest index. Items live in events tagged
+    // d=artstr:purchase:<sha256_b64url(addr)>, t=casewrap-purchase, so they
+    // can be discovered/queried independently.
+    async function _publishVault(vault) {
+      const fullPlain = JSON.stringify({ v: 1, updatedAt: vault.updatedAt || Date.now(), items: vault.items || [] });
+      // Probe size in single-vault shape.
+      const probe = await _selfEncrypt(fullPlain);
+      if (probe.length <= VAULT_SIZE_THRESHOLD) {
+        const { signed } = await _publishVaultEvent(fullPlain, VAULT_D_TAG);
+        _vaultCache = vault;
+        return signed;
+      }
+      // Split: publish each item as its own event, then publish the index
+      // with stubs only.
+      console.info(`[vault] single-vault size ${probe.length} > threshold ${VAULT_SIZE_THRESHOLD}; publishing per-item events.`);
+      for (const item of (vault.items || [])) {
+        if (!item?.a) continue;
+        try {
+          await _publishVaultEvent(
+            JSON.stringify({ v: 1, item }),
+            _vaultItemDTag(item.a),
+            [['t', 'casewrap-purchase']],
+          );
+        } catch (err) {
+          console.warn('[vault] per-item publish failed for', item.a, err);
+        }
+      }
+      const indexPlain = JSON.stringify({
+        v: 1,
+        updatedAt: vault.updatedAt || Date.now(),
+        split: true,
+        items: (vault.items || []).map(_vaultItemStub),
+      });
+      const { signed } = await _publishVaultEvent(indexPlain, VAULT_D_TAG);
       _vaultCache = vault;
       return signed;
     }
