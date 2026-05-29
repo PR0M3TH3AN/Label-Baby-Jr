@@ -16633,6 +16633,148 @@
       }
     }
 
+    // ---- Watermarked premium preview (PREMIUM_DESIGNS_FEATURE.md §5.4) -----
+    // Renders a low-res JPEG of the current artboard with a diagonal
+    // "ARTSTR PREMIUM · UNLOCK TO USE" watermark tiled across it. Used by
+    // the publish path for premium designs: the encrypted payload goes in
+    // event.content, the preview JPEG goes in the envelope so buyers know
+    // what they'd be paying for. Size-budgeted so the event still fits in
+    // standard relay limits.
+    const PREMIUM_PREVIEW = Object.freeze({
+      MAX_LONG_AXIS_PX: 720,
+      QUALITY: 0.65,
+      MAX_BYTES: 50 * 1024,
+      MIN_LONG_AXIS_PX: 360,   // give up below this rather than ship a blob
+      WATERMARK_TEXT: 'ARTSTR PREMIUM · UNLOCK TO USE',
+    });
+
+    // Long-axis inches for a given mode, so we can pick a DPI that lands
+    // close to the target pixel size without a wasted huge render.
+    function _premiumPreviewLongAxisInches(mode) {
+      if (mode === 'cover') {
+        return Math.max(state.panelW * 2 + state.spineW + state.bleed * 2, state.trimH + state.bleed * 2);
+      }
+      if (mode === 'disc-design') {
+        return discTemplate.discD; // single disc
+      }
+      if (mode === 'customart' || mode === 'slide') {
+        const w = (state.customArt?.width || 1920) / 96;
+        const h = (state.customArt?.height || 1080) / 96;
+        return Math.max(w, h);
+      }
+      // disc-sheet, jewel: letter-sized
+      return 11;
+    }
+
+    async function _renderModeToExportCanvas(mode, dpi) {
+      if (state.appMode === 'designer' || mode === 'disc-design') return renderDiscDesignToExportCanvas(dpi);
+      if (mode === 'cover') return renderCoverToExportCanvas(dpi);
+      if (mode === 'disc') return renderDiscSheetToExportCanvas(dpi);
+      if (mode === 'jewel') return renderJewelSheetToExportCanvas(dpi);
+      if (mode === 'customart' || mode === 'slide') return renderCustomArtToExportCanvas(dpi);
+      throw new Error(`Premium preview not supported for mode "${mode}".`);
+    }
+
+    function _drawPremiumWatermark(ctx, w, h) {
+      const text = PREMIUM_PREVIEW.WATERMARK_TEXT;
+      const fontPx = Math.max(12, Math.round(Math.min(w, h) * 0.045));
+      ctx.save();
+      ctx.font = `bold ${fontPx}px Helvetica, Arial, sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.lineWidth = Math.max(1, fontPx * 0.06);
+      // Spacing: stepX = measured text width + a comfortable gap so adjacent
+      // copies on the same row never overlap. stepY = ~3.5 line-heights so
+      // rows don't crash into each other after rotation.
+      const textW = ctx.measureText(text).width;
+      const stepX = Math.ceil(textW + fontPx * 4);
+      const stepY = Math.ceil(fontPx * 3.5);
+      // Centre, then rotate; tile out from there so the rotation doesn't
+      // leave bare corners.
+      ctx.translate(w / 2, h / 2);
+      ctx.rotate(-Math.PI / 10);  // ~ -18°
+      const reach = Math.ceil(Math.hypot(w, h));
+      const lines = Math.ceil(reach / stepY) + 1;
+      const cols  = Math.ceil(reach / stepX) + 1;
+      for (let yi = -lines; yi <= lines; yi++) {
+        const y = yi * stepY;
+        // Stagger every other row by half a step so the pattern doesn't read
+        // as a strict grid.
+        const xOff = (yi & 1) ? stepX / 2 : 0;
+        for (let xi = -cols; xi <= cols; xi++) {
+          const x = xi * stepX + xOff;
+          ctx.strokeStyle = 'rgba(255,255,255,0.45)';
+          ctx.strokeText(text, x, y);
+          ctx.fillStyle = 'rgba(15,23,42,0.26)';
+          ctx.fillText(text, x, y);
+        }
+      }
+      ctx.restore();
+    }
+
+    // Scale `src` into a new canvas whose longest side is `targetLong` (or
+    // smaller if the source was already smaller). Then draws the watermark
+    // overlay on top.
+    function _composeWatermarkedCanvas(src, targetLong) {
+      const longest = Math.max(src.width, src.height);
+      const scale = longest > targetLong ? (targetLong / longest) : 1;
+      const w = Math.max(1, Math.round(src.width * scale));
+      const h = Math.max(1, Math.round(src.height * scale));
+      const out = document.createElement('canvas');
+      out.width = w; out.height = h;
+      const ctx = out.getContext('2d');
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, w, h);
+      ctx.drawImage(src, 0, 0, w, h);
+      _drawPremiumWatermark(ctx, w, h);
+      return out;
+    }
+
+    function _canvasToJpegDataUrl(canvas, quality) {
+      return canvas.toDataURL('image/jpeg', quality);
+    }
+
+    // Public: render the current artboard as a watermarked JPEG data URL,
+    // budget-bounded. Throws if the artboard can't be reduced under MAX_BYTES
+    // even at MIN_LONG_AXIS_PX, so the publish modal can surface a precise
+    // "preview too large for premium publishing" error.
+    async function renderPremiumPreviewDataUrl() {
+      _exportFailedImages.clear();
+      const mode = state.templateMode;
+      const longestInches = _premiumPreviewLongAxisInches(mode) || 11;
+      // Pick a DPI such that long-axis pixels ≈ MAX_LONG_AXIS_PX.
+      let targetLong = PREMIUM_PREVIEW.MAX_LONG_AXIS_PX;
+      let lastSize = 0;
+      let lastSrc = null;
+      for (let attempt = 0; attempt < 4; attempt++) {
+        // Render only on the first attempt; subsequent attempts re-tile +
+        // re-encode the same source at a smaller dimension cap.
+        if (!lastSrc) {
+          const dpi = Math.max(36, Math.round(targetLong / longestInches));
+          lastSrc = await _renderModeToExportCanvas(mode, dpi);
+          if (_exportFailedImages.size > 0) {
+            throw new Error('Some images on the artboard could not be embedded (CORS / missing). Make them local or remove them before publishing premium.');
+          }
+        }
+        const watermarked = _composeWatermarkedCanvas(lastSrc, targetLong);
+        let dataUrl;
+        try { dataUrl = _canvasToJpegDataUrl(watermarked, PREMIUM_PREVIEW.QUALITY); }
+        catch (err) { throw new Error('Could not encode preview JPEG: ' + (err?.message || err)); }
+        const approxBytes = Math.ceil((dataUrl.length - dataUrl.indexOf(',') - 1) * 3 / 4);
+        lastSize = approxBytes;
+        if (approxBytes <= PREMIUM_PREVIEW.MAX_BYTES) {
+          return { dataUrl, bytes: approxBytes, width: watermarked.width, height: watermarked.height };
+        }
+        // Shrink and retry.
+        targetLong = Math.round(targetLong * 0.78);
+        if (targetLong < PREMIUM_PREVIEW.MIN_LONG_AXIS_PX) break;
+      }
+      throw new Error(`Premium preview is too large (${lastSize.toLocaleString()} bytes after retries). Simplify the design (smaller image layers, fewer fills) and try again.`);
+    }
+    // ---- end watermarked premium preview -----------------------------------
+
     function jpegFilenameStem() {
       const parts = [
         filenamePart(state.meta?.title) || 'design',
