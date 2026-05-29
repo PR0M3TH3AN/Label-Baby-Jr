@@ -196,24 +196,225 @@ window.ArtstrPptxImporter = (function () {
     return refs;
   }
 
+  // ---- Theme resolution -------------------------------------------------
+  // The PPTX inheritance chain (per NIP— sorry, per OOXML §19) is:
+  //   slide → slideLayout → slideMaster → theme.
+  // Each step is a separate part with its own _rels file; we chase the
+  // chain once per slide and cache the parsed theme by zip path so a
+  // 50-slide deck sharing one theme doesn't reparse the XML 50 times.
+  // Phase 6 resolves the color scheme (accent1..6, dk1/2, lt1/2 + the
+  // bg/tx aliases) and inherited slide backgrounds; font scheme is
+  // Phase 7.
+  const _themeCache = new Map();
+
+  // Color-scheme alias map (bg/tx are aliases for the lt/dk pairs in
+  // light themes — which is the default and what 99% of decks use).
+  const SCHEME_ALIASES = {
+    bg1: 'lt1',
+    bg2: 'lt2',
+    tx1: 'dk1',
+    tx2: 'dk2',
+  };
+
+  function _firstRelTarget(relsDoc, typeSuffix) {
+    if (!relsDoc) return '';
+    const rels = relsDoc.getElementsByTagName('Relationship');
+    for (let i = 0; i < rels.length; i++) {
+      const type = rels[i].getAttribute('Type') || '';
+      if (type.endsWith(typeSuffix)) return rels[i].getAttribute('Target') || '';
+    }
+    return '';
+  }
+
+  function _readRelsAt(files, path) {
+    const text = readZipText(files, path);
+    if (!text) return null;
+    try { return parseXml(text); } catch { return null; }
+  }
+
+  // Returns { colors: { accent1:'#...', dk1:'#...', ... }, themePath }
+  // or null when no theme is reachable from this slide.
+  function loadThemeForSlide(files, slidePath) {
+    if (!slidePath) return null;
+    // slide → slideLayout
+    const sm = slidePath.match(/^(.*\/)([^/]+)$/);
+    if (!sm) return null;
+    const slideRelsDoc = _readRelsAt(files, `${sm[1]}_rels/${sm[2]}.rels`);
+    const layoutTarget = _firstRelTarget(slideRelsDoc, '/slideLayout');
+    if (!layoutTarget) return null;
+    const layoutPath = pptxTargetToZipPath(slidePath, layoutTarget);
+
+    // slideLayout → slideMaster
+    const lm = layoutPath.match(/^(.*\/)([^/]+)$/);
+    if (!lm) return null;
+    const layoutRelsDoc = _readRelsAt(files, `${lm[1]}_rels/${lm[2]}.rels`);
+    const masterTarget = _firstRelTarget(layoutRelsDoc, '/slideMaster');
+    if (!masterTarget) return null;
+    const masterPath = pptxTargetToZipPath(layoutPath, masterTarget);
+
+    // slideMaster → theme
+    const mm = masterPath.match(/^(.*\/)([^/]+)$/);
+    if (!mm) return null;
+    const masterRelsDoc = _readRelsAt(files, `${mm[1]}_rels/${mm[2]}.rels`);
+    const themeTarget = _firstRelTarget(masterRelsDoc, '/theme');
+    if (!themeTarget) return null;
+    const themePath = pptxTargetToZipPath(masterPath, themeTarget);
+
+    if (_themeCache.has(themePath)) {
+      const cached = _themeCache.get(themePath);
+      return cached ? { ...cached, layoutPath, masterPath } : null;
+    }
+
+    const themeDoc = _readRelsAt(files, themePath);
+    if (!themeDoc) { _themeCache.set(themePath, null); return null; }
+    // Walk a:clrScheme/*. Each child element's localName is the slot
+    // name ('accent1', 'dk1', etc.), and its child is either srgbClr
+    // or sysClr (which carries a lastClr fallback hex).
+    const clrScheme = themeDoc.getElementsByTagName('a:clrScheme')[0]
+                   || themeDoc.getElementsByTagNameNS('*', 'clrScheme')[0];
+    const colors = {};
+    if (clrScheme) {
+      for (let i = 0; i < clrScheme.children.length; i++) {
+        const slot = clrScheme.children[i];
+        const slotName = slot.localName;
+        if (!slotName) continue;
+        // Most slots wrap a single srgbClr or sysClr child.
+        const srgb = _directChild(slot, 'srgbClr');
+        const sysClr = _directChild(slot, 'sysClr');
+        let hex = '';
+        if (srgb) {
+          hex = (srgb.getAttribute('val') || '').trim().toLowerCase();
+        } else if (sysClr) {
+          // sysClr@lastClr is the resolved hex of the last time the file
+          // was rendered — a good enough proxy here.
+          hex = (sysClr.getAttribute('lastClr') || '').trim().toLowerCase();
+        }
+        if (/^[0-9a-f]{6}$/.test(hex)) colors[slotName] = '#' + hex;
+      }
+    }
+    const out = { colors, themePath };
+    _themeCache.set(themePath, out);
+    return { ...out, layoutPath, masterPath };
+  }
+
+  // Map an a:schemeClr name to a hex via the theme, honoring the
+  // bg/tx → lt/dk aliases.
+  function _resolveSchemeName(name, theme) {
+    if (!theme || !theme.colors) return null;
+    const resolved = SCHEME_ALIASES[name] || name;
+    return theme.colors[resolved] || theme.colors[name] || null;
+  }
+
+  // ---- Color modifier math (lumMod / lumOff / tint / shade) -----------
+  // Operates in HSL. PPTX modifier values are in 1/1000 of a percent
+  // (so 60000 = 60%, 100000 = 100%).
+  function _hexToRgb(hex) {
+    return {
+      r: parseInt(hex.slice(1, 3), 16) / 255,
+      g: parseInt(hex.slice(3, 5), 16) / 255,
+      b: parseInt(hex.slice(5, 7), 16) / 255,
+    };
+  }
+  function _rgbToHex(r, g, b) {
+    const c = (n) => Math.round(Math.max(0, Math.min(1, n)) * 255).toString(16).padStart(2, '0');
+    return '#' + c(r) + c(g) + c(b);
+  }
+  function _rgbToHsl({ r, g, b }) {
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    const l = (max + min) / 2;
+    if (max === min) return { h: 0, s: 0, l };
+    const d = max - min;
+    const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    let h;
+    if (max === r)      h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+    else if (max === g) h = ((b - r) / d + 2) / 6;
+    else                h = ((r - g) / d + 4) / 6;
+    return { h, s, l };
+  }
+  function _hslToRgb({ h, s, l }) {
+    if (s === 0) return { r: l, g: l, b: l };
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+    const p = 2 * l - q;
+    const h2rgb = (t) => {
+      t = (t + 1) % 1;
+      if (t < 1 / 6) return p + (q - p) * 6 * t;
+      if (t < 1 / 2) return q;
+      if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+      return p;
+    };
+    return { r: h2rgb(h + 1 / 3), g: h2rgb(h), b: h2rgb(h - 1 / 3) };
+  }
+  // Read modifier children of a color element (srgbClr / schemeClr /
+  // sysClr) and return their values as fractions (0..1).
+  function _readColorModifiers(colorNode) {
+    const out = {};
+    if (!colorNode) return out;
+    for (let i = 0; i < colorNode.children.length; i++) {
+      const ch = colorNode.children[i];
+      const name = ch.localName;
+      const v = Number(ch.getAttribute('val')) / 100000;
+      if (!Number.isFinite(v)) continue;
+      if (name === 'lumMod') out.lumMod = v;
+      else if (name === 'lumOff') out.lumOff = v;
+      else if (name === 'tint') out.tint = v;
+      else if (name === 'shade') out.shade = v;
+    }
+    return out;
+  }
+  function _applyColorModifiers(hex, mods) {
+    if (!hex || !mods) return hex;
+    if (mods.lumMod == null && mods.lumOff == null && mods.tint == null && mods.shade == null) return hex;
+    const hsl = _rgbToHsl(_hexToRgb(hex));
+    if (mods.lumMod != null) hsl.l *= mods.lumMod;
+    if (mods.lumOff != null) hsl.l += mods.lumOff;
+    if (mods.tint != null)   hsl.l = hsl.l * (1 - mods.tint) + mods.tint;       // toward white
+    if (mods.shade != null)  hsl.l = hsl.l * mods.shade;                        // toward black
+    hsl.l = Math.max(0, Math.min(1, hsl.l));
+    const rgb = _hslToRgb(hsl);
+    return _rgbToHex(rgb.r, rgb.g, rgb.b);
+  }
+
   // ---- Color / fill / stroke helpers ------------------------------------
-  // Read a:srgbClr → '#rrggbb'. Returns null for scheme colors, preset
-  // colors, system colors, or anything else we can't resolve in this
-  // phase (theme resolution lands in Phase 6).
-  function convertColor(colorParentNode) {
+  // Read a color element (srgbClr / schemeClr / sysClr) into hex, with
+  // PPTX color modifiers (lumMod / lumOff / tint / shade) applied
+  // approximately in HSL. The optional `theme` argument lets schemeClr
+  // names resolve through the slide's inheritance chain (Phase 6).
+  // Returns null for preset colors and anything else we can't reach.
+  function convertColor(colorParentNode, theme) {
     if (!colorParentNode) return null;
-    const srgb = colorParentNode.getElementsByTagName('a:srgbClr')[0]
-              || colorParentNode.getElementsByTagNameNS('*', 'srgbClr')[0];
-    if (!srgb) return null;
-    const hex = (srgb.getAttribute('val') || '').trim().toLowerCase();
-    if (!/^[0-9a-f]{6}$/.test(hex)) return null;
-    return '#' + hex;
+    // The parent can either be the color element itself (when called
+    // directly on a:srgbClr in some paths) or a wrapper containing one.
+    const candidates = [colorParentNode];
+    for (let i = 0; i < colorParentNode.children.length; i++) {
+      candidates.push(colorParentNode.children[i]);
+    }
+    for (const node of candidates) {
+      const ln = node.localName;
+      let hex = null;
+      let modSource = null;
+      if (ln === 'srgbClr') {
+        const v = (node.getAttribute('val') || '').trim().toLowerCase();
+        if (/^[0-9a-f]{6}$/.test(v)) { hex = '#' + v; modSource = node; }
+      } else if (ln === 'schemeClr') {
+        const name = (node.getAttribute('val') || '').trim();
+        const resolved = _resolveSchemeName(name, theme);
+        if (resolved) { hex = resolved; modSource = node; }
+      } else if (ln === 'sysClr') {
+        const last = (node.getAttribute('lastClr') || '').trim().toLowerCase();
+        if (/^[0-9a-f]{6}$/.test(last)) { hex = '#' + last; modSource = node; }
+      }
+      if (hex) {
+        const mods = _readColorModifiers(modSource);
+        return _applyColorModifiers(hex, mods);
+      }
+    }
+    return null;
   }
 
   // Read a:solidFill from inside a spPr / ln node. Returns Artstr fill
   // descriptor or null when no fill is set, or { type: 'none' } when
   // an explicit a:noFill is present.
-  function readFill(spPrNode) {
+  function readFill(spPrNode, theme) {
     if (!spPrNode) return null;
     const noFill = spPrNode.getElementsByTagName('a:noFill')[0]
                 || spPrNode.getElementsByTagNameNS('*', 'noFill')[0];
@@ -221,7 +422,7 @@ window.ArtstrPptxImporter = (function () {
     if (noFill && noFill.parentNode === spPrNode) return { type: 'none' };
     const solid = _directChild(spPrNode, 'solidFill');
     if (!solid) return null;
-    const color = convertColor(solid);
+    const color = convertColor(solid, theme);
     if (!color) return null;
     return { type: 'solid', color };
   }
@@ -230,7 +431,7 @@ window.ArtstrPptxImporter = (function () {
   // convert through the slide scale (inches per EMU) to land in Artstr's
   // inch-based layer coord system. Minimum visible width is ~1 pixel
   // equivalent (1/96 inch) so a 0-width hairline still renders.
-  function readStroke(spPrNode, scale) {
+  function readStroke(spPrNode, scale, theme) {
     if (!spPrNode) return null;
     const ln = _directChild(spPrNode, 'ln');
     if (!ln) return null;
@@ -243,7 +444,7 @@ window.ArtstrPptxImporter = (function () {
     if (lnNoFill) return { type: 'none', color: '#000000', width, dash: 'solid' };
     const solid = _directChild(ln, 'solidFill');
     if (!solid) return null;
-    const color = convertColor(solid);
+    const color = convertColor(solid, theme);
     if (!color) return null;
     // a:prstDash → Artstr dash. Map the three styles Artstr supports.
     const prstDash = _directChild(ln, 'prstDash');
@@ -348,47 +549,41 @@ window.ArtstrPptxImporter = (function () {
   //
   // Returns either a CSS hex string like '#fbf8f0' or null if nothing
   // usable was found (caller leaves slide.background at the default).
-  function readSlideBackground(slideDoc, slideIndex, report) {
-    const bg = slideDoc.getElementsByTagName('p:bg')[0]
-           || slideDoc.getElementsByTagNameNS('*', 'bg')[0];
-    if (!bg) return null;
-
-    // Direct background properties live in <p:bgPr>. <p:bgRef> means the
-    // slide inherits from its layout/master via a theme scheme — defer
-    // to Phase 6 with a warning.
-    const bgRef = bg.getElementsByTagName('p:bgRef')[0]
-              || bg.getElementsByTagNameNS('*', 'bgRef')[0];
-    if (bgRef) {
-      _warn(report, slideIndex, 'LAYOUT_INHERITANCE_PARTIAL',
-        `Slide ${slideIndex + 1}: background inherited from layout/master — not resolved in Phase 1.`);
-      return null;
-    }
-
-    const bgPr = bg.getElementsByTagName('p:bgPr')[0]
-             || bg.getElementsByTagNameNS('*', 'bgPr')[0];
+  // Resolve a p:bg/p:bgPr/a:solidFill into a hex via the theme. Returns
+  // null when there's no solid fill (gradient / picture / etc.) — these
+  // are still Phase 7+ work.
+  function _readBackgroundFromBgNode(bgNode, theme) {
+    if (!bgNode) return null;
+    const bgPr = _directChild(bgNode, 'bgPr');
     if (!bgPr) return null;
+    const solid = _directChild(bgPr, 'solidFill');
+    if (!solid) return null;
+    return convertColor(solid, theme);
+  }
 
-    // Only solidFill + srgbClr in Phase 1. gradFill, blipFill (picture),
-    // pattFill, and schemeClr-based fills land in Phase 6 with the rest
-    // of theme resolution.
-    const solid = bgPr.getElementsByTagName('a:solidFill')[0]
-              || bgPr.getElementsByTagNameNS('*', 'solidFill')[0];
-    if (!solid) {
-      _warn(report, slideIndex, 'THEME_COLOR_UNRESOLVED',
-        `Slide ${slideIndex + 1}: non-solid background fill (gradient / picture / scheme color) — left as default for now.`);
-      return null;
-    }
+  function readSlideBackground(slideDoc, slideIndex, report, theme, files, layoutPath, masterPath) {
+    // 1) Direct slide background.
+    const slideBg = slideDoc.getElementsByTagName('p:bg')[0]
+                || slideDoc.getElementsByTagNameNS('*', 'bg')[0];
+    const direct = _readBackgroundFromBgNode(slideBg, theme);
+    if (direct) return direct;
 
-    const srgb = solid.getElementsByTagName('a:srgbClr')[0]
-              || solid.getElementsByTagNameNS('*', 'srgbClr')[0];
-    if (!srgb) {
-      _warn(report, slideIndex, 'THEME_COLOR_UNRESOLVED',
-        `Slide ${slideIndex + 1}: background uses a scheme color — theme resolution is Phase 6.`);
-      return null;
+    // 2) Inherit from slide layout's p:bg, then slide master's p:bg.
+    // p:bgRef in the slide explicitly references the layout's bg, but in
+    // practice we walk both regardless — whichever has a concrete fill
+    // wins.
+    for (const path of [layoutPath, masterPath]) {
+      if (!path) continue;
+      const text = readZipText(files, path);
+      if (!text) continue;
+      let doc;
+      try { doc = parseXml(text); } catch { continue; }
+      const bgNode = doc.getElementsByTagName('p:bg')[0]
+                 || doc.getElementsByTagNameNS('*', 'bg')[0];
+      const inherited = _readBackgroundFromBgNode(bgNode, theme);
+      if (inherited) return inherited;
     }
-    const hex = (srgb.getAttribute('val') || '').trim().toLowerCase();
-    if (!/^[0-9a-f]{6}$/.test(hex)) return null;
-    return '#' + hex;
+    return null;
   }
 
   // ---- Text helpers ----------------------------------------------------
@@ -414,7 +609,7 @@ window.ArtstrPptxImporter = (function () {
   // Walk a:r (run) and a:br (line break) children of a paragraph,
   // returning { text, firstRunStyle }. PPTX paragraphs can also contain
   // a:fld (field) runs which we treat like a:r for text extraction.
-  function _readParagraphRuns(pNode) {
+  function _readParagraphRuns(pNode, theme) {
     let text = '';
     let firstRunStyle = null;
     for (let i = 0; i < pNode.children.length; i++) {
@@ -426,7 +621,7 @@ window.ArtstrPptxImporter = (function () {
         if (t) text += t.textContent || '';
         if (!firstRunStyle) {
           const rPr = _directChild(child, 'rPr');
-          if (rPr) firstRunStyle = _readRunStyle(rPr);
+          if (rPr) firstRunStyle = _readRunStyle(rPr, theme);
         }
       } else if (ln === 'br') {
         text += '\n';
@@ -439,7 +634,7 @@ window.ArtstrPptxImporter = (function () {
   // size (sz, hundredths of pt), bold (b), italic (i), color, and
   // font family (latin@typeface). Theme-relative colours / fonts are
   // resolved later in Phase 6 — for now we just take what's explicit.
-  function _readRunStyle(rPr) {
+  function _readRunStyle(rPr, theme) {
     if (!rPr) return null;
     const out = {};
     const sz = rPr.getAttribute('sz');
@@ -453,7 +648,7 @@ window.ArtstrPptxImporter = (function () {
     if (i === '1' || i === 'true') out.italic = true;
     const fill = _directChild(rPr, 'solidFill');
     if (fill) {
-      const c = convertColor(fill);
+      const c = convertColor(fill, theme);
       if (c) out.color = c;
     }
     const latin = _directChild(rPr, 'latin');
@@ -469,7 +664,7 @@ window.ArtstrPptxImporter = (function () {
   // Read p:txBody → Artstr text layer's html + dominant style.
   // Phase 2 uses the first run's style for the whole text box; per-run
   // rich text is a Phase 7 enhancement.
-  function _readTxBody(txBodyNode) {
+  function _readTxBody(txBodyNode, theme) {
     if (!txBodyNode) return null;
     const paragraphs = [];
     let dominantStyle = null;
@@ -477,7 +672,7 @@ window.ArtstrPptxImporter = (function () {
     for (let i = 0; i < txBodyNode.children.length; i++) {
       const p = txBodyNode.children[i];
       if (p.localName !== 'p') continue;
-      const { text, firstRunStyle } = _readParagraphRuns(p);
+      const { text, firstRunStyle } = _readParagraphRuns(p, theme);
       if (!dominantStyle && firstRunStyle) dominantStyle = firstRunStyle;
       // alignment lives on the paragraph (a:pPr@algn); take the first
       // paragraph's alignment as the layer's alignment.
@@ -687,7 +882,7 @@ window.ArtstrPptxImporter = (function () {
       return null;
     }
 
-    const body = _readTxBody(txBody);
+    const body = _readTxBody(txBody, ctx.theme);
     if (!body) return null; // empty placeholder text
 
     const style = body.dominantStyle;
@@ -748,6 +943,21 @@ window.ArtstrPptxImporter = (function () {
     // Shallow-clone so subsequent shapes don't mutate the shared template.
     shape = { ...shape };
 
+    // PPTX lines and straight connectors go corner-to-corner of their
+    // bounding box; flipH / flipV choose which diagonal. The default
+    // line-shape template ships as a horizontal segment, which looks
+    // right for thin horizontal bounds but flat for diagonals — fix by
+    // honouring the flips here.
+    if (shape.kind === 'line') {
+      const flipH = xfrm.getAttribute('flipH') === '1';
+      const flipV = xfrm.getAttribute('flipV') === '1';
+      // Base diagonal: top-left → bottom-right.
+      let x1 = 0, y1 = 0, x2 = 100, y2 = 100;
+      if (flipH) { x1 = 100; x2 = 0; }
+      if (flipV) { y1 = (y1 === 0 ? 100 : 0); y2 = (y2 === 0 ? 100 : 0); }
+      shape.x1 = x1; shape.y1 = y1; shape.x2 = x2; shape.y2 = y2;
+    }
+
     // Name the layer with PowerPoint's <p:cNvPr name="..."> if present so
     // the user can match it back to the source deck in the layer panel.
     const cNvPr = spNode.getElementsByTagName('p:cNvPr')[0]
@@ -755,8 +965,8 @@ window.ArtstrPptxImporter = (function () {
     const sourceName = cNvPr?.getAttribute('name') || '';
     const name = sourceName ? `${label || 'Shape'} (${sourceName})` : (label || 'Shape');
 
-    const fill = readFill(spPr) || { type: 'none' };
-    const stroke = readStroke(spPr, ctx.scale) || { type: 'none', color: '#000000', width: 1, dash: 'solid' };
+    const fill = readFill(spPr, ctx.theme) || { type: 'none' };
+    const stroke = readStroke(spPr, ctx.scale, ctx.theme) || { type: 'none', color: '#000000', width: 1, dash: 'solid' };
 
     return {
       id: _makePptxLayerId(),
@@ -922,6 +1132,11 @@ window.ArtstrPptxImporter = (function () {
     if (!file) throw new Error('No file provided.');
     if (!report) report = makePptxImportReport(file.name);
 
+    // The theme cache is keyed by zip path, which is per-package — clear
+    // it between imports so a re-import of a different .pptx doesn't
+    // reuse a stale entry under the same path.
+    _themeCache.clear();
+
     const files = await readPptxPackage(file);
     const presentation = readPresentationInfo(files, report);
     // EMU → Artstr layer inches. Layer x/y/w/h and stroke width all live
@@ -948,17 +1163,23 @@ window.ArtstrPptxImporter = (function () {
       const layers = [];
       const slidePath = presentation.slideRefs[i].path;
       const slideText = slidePath ? readZipText(files, slidePath) : null;
+      // Resolve the theme + layout / master paths for this slide once;
+      // every converter and the background reader use them.
+      const theme = loadThemeForSlide(files, slidePath);
+      const layoutPath = theme?.layoutPath || '';
+      const masterPath = theme?.masterPath || '';
+
       if (slideText) {
         try {
           const slideDoc = parseXml(slideText);
-          const bg = readSlideBackground(slideDoc, i, report);
+          const bg = readSlideBackground(slideDoc, i, report, theme, files, layoutPath, masterPath);
           if (bg) {
             background = bg;
             report.imported.backgrounds += 1;
           }
-          // Walk the shape tree and convert each p:sp with prstGeom into
-          // an Artstr shape layer. Phase 2 will fill in text; Phase 3
-          // fills in images / chart placeholders; Phase 5 flattens groups.
+          // Walk the shape tree and convert each p:sp / p:pic /
+          // p:graphicFrame / p:grpSp. Theme + group transform are
+          // threaded through ctx.
           const spTree = slideDoc.getElementsByTagName('p:spTree')[0]
                      || slideDoc.getElementsByTagNameNS('*', 'spTree')[0];
           const slideRels = readSlideRels(files, slidePath);
@@ -969,6 +1190,7 @@ window.ArtstrPptxImporter = (function () {
             nextZ: 0,
             slideRels,
             groupXfrm: IDENTITY_GROUP_XFRM,
+            theme,
           };
           walkSpTree(spTree, ctx, layers);
         } catch (err) {
@@ -1044,6 +1266,8 @@ window.ArtstrPptxImporter = (function () {
       readXfrm,
       enterGroup,
       IDENTITY_GROUP_XFRM,
+      loadThemeForSlide,
+      _applyColorModifiers,
       convertPresetShape,
       convertTextShape,
       convertPicture,
