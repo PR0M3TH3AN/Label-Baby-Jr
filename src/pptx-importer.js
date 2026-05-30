@@ -1153,6 +1153,155 @@ window.ArtstrPptxImporter = (function () {
     return layers;
   }
 
+  // Build an SVG path-d string for a single pie / doughnut slice in
+  // a 100x100 coord system centred at (50, 50). Angles are in
+  // radians; positive sweep direction is clockwise on screen (SVG's
+  // +y is down, so increasing angle = visually clockwise).  innerR
+  // > 0 produces a doughnut ring sector.
+  function _sliceArcPath(cx, cy, outerR, startAngle, endAngle, innerR) {
+    const sweep = endAngle - startAngle;
+    if (sweep <= 0) return '';
+    const TAU = Math.PI * 2;
+    // Full circle: emit two half-arcs so SVG can render it.
+    if (sweep >= TAU - 1e-6) {
+      const right = cx + outerR;
+      if (innerR > 0) {
+        const innerRight = cx + innerR;
+        return `M ${right} ${cy} A ${outerR} ${outerR} 0 1 1 ${cx - outerR} ${cy} A ${outerR} ${outerR} 0 1 1 ${right} ${cy} Z M ${innerRight} ${cy} A ${innerR} ${innerR} 0 1 0 ${cx - innerR} ${cy} A ${innerR} ${innerR} 0 1 0 ${innerRight} ${cy} Z`;
+      }
+      return `M ${right} ${cy} A ${outerR} ${outerR} 0 1 1 ${cx - outerR} ${cy} A ${outerR} ${outerR} 0 1 1 ${right} ${cy} Z`;
+    }
+    const large = sweep > Math.PI ? 1 : 0;
+    const x1 = cx + outerR * Math.cos(startAngle);
+    const y1 = cy + outerR * Math.sin(startAngle);
+    const x2 = cx + outerR * Math.cos(endAngle);
+    const y2 = cy + outerR * Math.sin(endAngle);
+    if (innerR > 0) {
+      const ix1 = cx + innerR * Math.cos(startAngle);
+      const iy1 = cy + innerR * Math.sin(startAngle);
+      const ix2 = cx + innerR * Math.cos(endAngle);
+      const iy2 = cy + innerR * Math.sin(endAngle);
+      // Outer arc forward, line in, inner arc back, line out.
+      return `M ${x1} ${y1} A ${outerR} ${outerR} 0 ${large} 1 ${x2} ${y2} L ${ix2} ${iy2} A ${innerR} ${innerR} 0 ${large} 0 ${ix1} ${iy1} Z`;
+    }
+    return `M ${cx} ${cy} L ${x1} ${y1} A ${outerR} ${outerR} 0 ${large} 1 ${x2} ${y2} Z`;
+  }
+
+  // Pick the per-slice fill colour for a pie / doughnut. PPTX
+  // priority:
+  //   1. c:ser/c:dPt[@idx=sliceIdx]/c:spPr/a:solidFill — explicit
+  //      per-slice override (the common case in templated decks).
+  //   2. c:varyColors val="1" (the pie default) — palette rotation
+  //      indexed by sliceIdx.
+  //   3. c:ser/c:spPr/a:solidFill — uniform-colour pie.
+  //   4. CHART_DEFAULT_PALETTE indexed by sliceIdx as final fallback.
+  function _readPieSliceColor(serNode, sliceIdx, varyColors, theme) {
+    for (let i = 0; i < serNode.children.length; i++) {
+      const ch = serNode.children[i];
+      if (ch.localName !== 'dPt') continue;
+      const idxN = _directChild(ch, 'idx');
+      if (!idxN || Number(idxN.getAttribute('val')) !== sliceIdx) continue;
+      const spPr = _directChild(ch, 'spPr');
+      if (!spPr) continue;
+      const solid = _directChild(spPr, 'solidFill');
+      if (solid) {
+        const c = convertColor(solid, theme);
+        if (c) return c;
+      }
+    }
+    if (varyColors) {
+      return CHART_DEFAULT_PALETTE[sliceIdx % CHART_DEFAULT_PALETTE.length];
+    }
+    const spPr = _directChild(serNode, 'spPr');
+    if (spPr) {
+      const solid = _directChild(spPr, 'solidFill');
+      if (solid) {
+        const c = convertColor(solid, theme);
+        if (c) return c;
+      }
+    }
+    return CHART_DEFAULT_PALETTE[sliceIdx % CHART_DEFAULT_PALETTE.length];
+  }
+
+  // c:pieChart / c:doughnutChart → an array of path-shape layers,
+  // one per slice. All slices share a common square sub-bounds
+  // centred in the chart's graphicFrame area so the pie renders
+  // circular even when the chart's overall bounds are rectangular.
+  function buildPieChartLayers(pieChartNode, gfBounds, chartLabel, ctx, opts) {
+    const isDoughnut = !!(opts && opts.isDoughnut);
+    const varyColorsNode = _directChild(pieChartNode, 'varyColors');
+    const varyColors = varyColorsNode
+      ? (varyColorsNode.getAttribute('val') !== '0')
+      : true; // default for pie / doughnut
+
+    const serNode = _directChild(pieChartNode, 'ser');
+    if (!serNode) return null;
+
+    const values = readSeriesValues(_directChild(serNode, 'val'));
+    const categories = readCategoryLabels(_directChild(serNode, 'cat'));
+    let total = 0;
+    for (const v of values) total += Math.max(0, Number(v) || 0);
+    if (total <= 0) return null;
+
+    let holePct = 50;
+    if (isDoughnut) {
+      const hsNode = _directChild(pieChartNode, 'holeSize');
+      const v = Number(hsNode?.getAttribute('val'));
+      if (Number.isFinite(v) && v > 0) holePct = Math.max(10, Math.min(90, v));
+    }
+
+    let firstAngleDeg = 0;
+    const fsNode = _directChild(pieChartNode, 'firstSliceAng');
+    const fsv = Number(fsNode?.getAttribute('val'));
+    if (Number.isFinite(fsv)) firstAngleDeg = fsv;
+
+    const side = Math.min(gfBounds.w, gfBounds.h);
+    const sliceBounds = {
+      x: gfBounds.x + (gfBounds.w - side) / 2,
+      y: gfBounds.y + (gfBounds.h - side) / 2,
+      w: side,
+      h: side,
+    };
+
+    const cx = 50, cy = 50;
+    const outerR = 45;
+    const innerR = isDoughnut ? outerR * (holePct / 100) : 0;
+    let angle = -Math.PI / 2 + (firstAngleDeg * Math.PI / 180);
+
+    const layers = [];
+    for (let i = 0; i < values.length; i++) {
+      const v = Math.max(0, Number(values[i]) || 0);
+      if (v <= 0) continue;
+      const sweep = (Math.PI * 2) * (v / total);
+      const d = _sliceArcPath(cx, cy, outerR, angle, angle + sweep, innerR);
+      angle += sweep;
+      if (!d) continue;
+      const color = _readPieSliceColor(serNode, i, varyColors, ctx.theme);
+      const catLabel = categories[i] || `Slice ${i + 1}`;
+      layers.push({
+        id: _makePptxLayerId(),
+        type: 'shape',
+        name: `${chartLabel} / Slice [${catLabel}] (${v})`,
+        target: 'canvas',
+        x: sliceBounds.x,
+        y: sliceBounds.y,
+        w: sliceBounds.w,
+        h: sliceBounds.h,
+        rotate: 0,
+        opacity: 1,
+        z: ctx.nextZ++,
+        shape: {
+          kind: 'path',
+          d,
+          viewBox: { x: 0, y: 0, w: 100, h: 100 },
+        },
+        fill: { type: 'solid', color },
+        stroke: { type: 'none', color: '#000000', width: 1, dash: 'solid' },
+      });
+    }
+    return layers.length ? layers : null;
+  }
+
   // Dispatch on the chart type inside c:chartSpace/c:chart/c:plotArea.
   // Returns an array of Artstr layers or null when the chart type
   // isn't natively supported (caller falls back to placeholder).
@@ -1168,9 +1317,14 @@ window.ArtstrPptxImporter = (function () {
       if (ch.localName === 'barChart') {
         return buildBarChartLayers(ch, gfBounds, chartLabel, ctx);
       }
-      // Phase 2: pieChart / doughnutChart
+      if (ch.localName === 'pieChart') {
+        return buildPieChartLayers(ch, gfBounds, chartLabel, ctx, { isDoughnut: false });
+      }
+      if (ch.localName === 'doughnutChart') {
+        return buildPieChartLayers(ch, gfBounds, chartLabel, ctx, { isDoughnut: true });
+      }
       // Phase 3: lineChart
-      // Phase 5: bar3DChart, line3DChart, etc.
+      // Phase 5: bar3DChart, line3DChart, pie3DChart, etc.
     }
     return null;
   }
@@ -1776,6 +1930,8 @@ window.ArtstrPptxImporter = (function () {
       readSeriesName,
       readSeriesColor,
       buildBarChartLayers,
+      buildPieChartLayers,
+      _sliceArcPath,
       convertChart,
       walkSpTree,
       readSlideRels,
