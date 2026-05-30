@@ -1053,29 +1053,53 @@ window.ArtstrPptxImporter = (function () {
     // zero area are dropped (nothing to render).
     if (shape.kind !== 'line' && (bounds.w <= 0 || bounds.h <= 0)) return null;
 
-    // PPTX lines and straight connectors go corner-to-corner of their
-    // bounding box; flipH / flipV choose which diagonal. Bent and
-    // curved connectors get a straight-line approximation (Phase 7
-    // doesn't resolve the per-segment a:gd guides yet).
+    // PPTX lines come in three flavours determined by the SOURCE
+    // bounding-box extents: horizontal (cy=0), vertical (cx=0), and
+    // diagonal (both > 0). Earlier versions always used corner-to-
+    // corner endpoints (0,0)→(100,100), which gave a 0.26° slope
+    // across a 2px-clamped degenerate axis — i.e. slightly-tilted
+    // "horizontal" lines. Detect the source extents and pick endpoints
+    // that stay flat for horizontal / vertical, only using the
+    // diagonal for genuinely diagonal lines.
     if (shape.kind === 'line') {
       const flipH = xfrm.getAttribute('flipH') === '1';
       const flipV = xfrm.getAttribute('flipV') === '1';
-      // Base diagonal: top-left → bottom-right.
-      let x1 = 0, y1 = 0, x2 = 100, y2 = 100;
-      if (flipH) { x1 = 100; x2 = 0; }
-      if (flipV) { y1 = (y1 === 0 ? 100 : 0); y2 = (y2 === 0 ? 100 : 0); }
+      const offNode = _directChild(xfrm, 'off');
+      const extNode = _directChild(xfrm, 'ext');
+      const srcCx = Number(extNode?.getAttribute('cx')) || 0;
+      const srcCy = Number(extNode?.getAttribute('cy')) || 0;
+      const isHorizontal = srcCy === 0 && srcCx > 0;
+      const isVertical = srcCx === 0 && srcCy > 0;
+      let x1, y1, x2, y2;
+      if (isHorizontal) {
+        // Flat: both endpoints at vertical midpoint.
+        x1 = 0; y1 = 50; x2 = 100; y2 = 50;
+        if (flipH) { x1 = 100; x2 = 0; }
+      } else if (isVertical) {
+        // Flat: both endpoints at horizontal midpoint.
+        x1 = 50; y1 = 0; x2 = 50; y2 = 100;
+        if (flipV) { y1 = 100; y2 = 0; }
+      } else {
+        // Diagonal: corner-to-corner with flip handling.
+        x1 = 0; y1 = 0; x2 = 100; y2 = 100;
+        if (flipH) { x1 = 100; x2 = 0; }
+        if (flipV) { [y1, y2] = [y2, y1]; }
+      }
       shape.x1 = x1; shape.y1 = y1; shape.x2 = x2; shape.y2 = y2;
 
-      // Horizontal lines arrive with cy=0 and vertical with cx=0. The
-      // Artstr renderer scales an inner SVG into the layer's actual
-      // pixel box, so a zero-thickness layer renders nothing even
-      // though the stroke would otherwise stick out via overflow:
-      // visible. Expand the degenerate dimension to a small minimum
-      // so the layer has rendering surface for the stroke. The line
-      // itself stays at the source coordinate within the expanded box.
-      const MIN_LINE_THICKNESS_IN = 2 / PX_PER_IN; // ~2px
-      if (bounds.w <= 0) bounds.w = MIN_LINE_THICKNESS_IN;
-      if (bounds.h <= 0) bounds.h = MIN_LINE_THICKNESS_IN;
+      // Expand a degenerate-axis bounding box to a small minimum so
+      // the layer has render surface (a 0-pixel-tall DOM box renders
+      // nothing even with overflow:visible). Centre the expansion on
+      // the source axis so the line stays at its original position.
+      const MIN_LINE_THICKNESS_IN = 1 / PX_PER_IN; // ~1px
+      if (bounds.w <= 0) {
+        bounds.x -= MIN_LINE_THICKNESS_IN / 2;
+        bounds.w = MIN_LINE_THICKNESS_IN;
+      }
+      if (bounds.h <= 0) {
+        bounds.y -= MIN_LINE_THICKNESS_IN / 2;
+        bounds.h = MIN_LINE_THICKNESS_IN;
+      }
 
       if (APPROXIMATED_AS_LINE.has(prst)) {
         _warn(ctx.report, ctx.slideIndex, 'UNSUPPORTED_CONNECTOR_APPROXIMATED',
