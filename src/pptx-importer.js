@@ -606,28 +606,87 @@ window.ArtstrPptxImporter = (function () {
       .replace(/'/g, '&#39;');
   }
 
-  // Walk a:r (run) and a:br (line break) children of a paragraph,
-  // returning { text, firstRunStyle }. PPTX paragraphs can also contain
-  // a:fld (field) runs which we treat like a:r for text extraction.
+  // Walk a:r (run), a:fld (field), and a:br (line break) children of a
+  // paragraph and return an ordered list of { text, style } entries.
+  // a:br becomes a run with text '\n' and a null style so the HTML
+  // builder can emit a <br> without wrapping it. style is null when
+  // a run has no a:rPr — the renderer will fall back to layer defaults
+  // for those runs.
+  //
+  // Callers that only need plain text concatenate `.text` across the
+  // returned runs (used by the notes-slide reader).
   function _readParagraphRuns(pNode, theme) {
-    let text = '';
-    let firstRunStyle = null;
+    const runs = [];
     for (let i = 0; i < pNode.children.length; i++) {
       const child = pNode.children[i];
       const ln = child.localName;
       if (ln === 'r' || ln === 'fld') {
         const t = child.getElementsByTagName('a:t')[0]
               || child.getElementsByTagNameNS('*', 't')[0];
-        if (t) text += t.textContent || '';
-        if (!firstRunStyle) {
-          const rPr = _directChild(child, 'rPr');
-          if (rPr) firstRunStyle = _readRunStyle(rPr, theme);
-        }
+        const text = t ? (t.textContent || '') : '';
+        if (!text) continue;
+        const rPr = _directChild(child, 'rPr');
+        const style = rPr ? _readRunStyle(rPr, theme) : null;
+        runs.push({ text, style });
       } else if (ln === 'br') {
-        text += '\n';
+        runs.push({ text: '\n', style: null });
       }
     }
-    return { text, firstRunStyle };
+    return runs;
+  }
+
+  // Plain text from a list of runs. Used by the notes-slide reader,
+  // which doesn't care about per-run styling.
+  function _runsToPlainText(runs) {
+    let s = '';
+    for (const r of runs) s += r.text;
+    return s;
+  }
+
+  // Render a single run into HTML, wrapping with <b>/<i>/<span> only
+  // for fields that differ from the dominant (layer-level) style. The
+  // layer's defaults already handle anything matching dominant, so we
+  // emit the minimum markup needed for fidelity.
+  //
+  // dominant is normalised to {} when no run had explicit style.
+  function _runToHtml(run, dominant) {
+    let body = _escapeHtml(run.text).replace(/\n/g, '<br>');
+    if (!run.style) return body; // inherit layer defaults
+    const s = run.style;
+    const d = dominant || {};
+    // Build the inline-style fragment for font-size / color / family
+    // overrides.
+    const styleParts = [];
+    if (s.fontSize != null && s.fontSize !== d.fontSize) {
+      styleParts.push(`font-size:${s.fontSize}pt`);
+    }
+    if (s.color && s.color !== d.color) {
+      styleParts.push(`color:${s.color}`);
+    }
+    if (s.fontFamily && s.fontFamily !== d.fontFamily) {
+      // PPTX font names can contain spaces; quote with HTML entities
+      // so the inner quotes don't terminate the style="..." attribute.
+      const safe = s.fontFamily.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+      styleParts.push(`font-family:&quot;${safe}&quot;`);
+    }
+    // Wrapping order: <span style> goes innermost, then <i>, then <b>
+    // outermost. b/i are categorical state; the inline style is the
+    // fine-grained override.
+    if (styleParts.length) {
+      body = `<span style="${styleParts.join(';')}">${body}</span>`;
+    }
+    // Italic delta. The reverse case (dominant italic, run not) gets
+    // an explicit font-style:normal span.
+    if (s.italic && !d.italic) body = `<i>${body}</i>`;
+    else if (!s.italic && d.italic && run.style) {
+      body = `<span style="font-style:normal">${body}</span>`;
+    }
+    // Bold delta — same shape as italic.
+    if (s.bold && !d.bold) body = `<b>${body}</b>`;
+    else if (!s.bold && d.bold && run.style) {
+      body = `<span style="font-weight:normal">${body}</span>`;
+    }
+    return body;
   }
 
   // Pull the inline style off an a:rPr (run properties) node:
@@ -661,43 +720,60 @@ window.ArtstrPptxImporter = (function () {
     return out;
   }
 
-  // Read p:txBody → Artstr text layer's html + dominant style.
-  // Phase 2 uses the first run's style for the whole text box; per-run
-  // rich text is a Phase 7 enhancement.
+  // Read p:txBody → Artstr text layer's html + dominant style. The
+  // first run with an explicit a:rPr becomes the layer-level dominant;
+  // subsequent runs that disagree get wrapped in inline <b>/<i>/<span>
+  // so mid-paragraph styling survives the round-trip.
   function _readTxBody(txBodyNode, theme) {
     if (!txBodyNode) return null;
+    // Walk every paragraph up front so we can pick the dominant style
+    // before emitting any HTML.
     const paragraphs = [];
-    let dominantStyle = null;
     let alignFromFirstP = null;
     for (let i = 0; i < txBodyNode.children.length; i++) {
       const p = txBodyNode.children[i];
       if (p.localName !== 'p') continue;
-      const { text, firstRunStyle } = _readParagraphRuns(p, theme);
-      if (!dominantStyle && firstRunStyle) dominantStyle = firstRunStyle;
-      // alignment lives on the paragraph (a:pPr@algn); take the first
-      // paragraph's alignment as the layer's alignment.
-      if (alignFromFirstP === null) {
-        const pPr = _directChild(p, 'pPr');
-        const algn = pPr?.getAttribute('algn');
-        if (algn && PPTX_ALIGN_TO_ARTSTR[algn]) {
-          alignFromFirstP = PPTX_ALIGN_TO_ARTSTR[algn];
-        }
-      }
-      paragraphs.push(text);
+      const runs = _readParagraphRuns(p, theme);
+      const pPr = _directChild(p, 'pPr');
+      const algn = pPr?.getAttribute('algn');
+      const align = (algn && PPTX_ALIGN_TO_ARTSTR[algn]) ? PPTX_ALIGN_TO_ARTSTR[algn] : null;
+      if (alignFromFirstP === null && align) alignFromFirstP = align;
+      paragraphs.push({ runs });
     }
-    const allText = paragraphs.join('\n').trim();
-    if (!allText) return null;
-    // Escape per-paragraph, then join with <br> (and inline-newline runs
-    // contribute their own <br> via the \n we inserted in
-    // _readParagraphRuns).
-    const html = paragraphs
-      .map((p) => _escapeHtml(p).replace(/\n/g, '<br>'))
-      .join('<br>');
+
+    // Dominant style = first run anywhere in the body with an explicit
+    // rPr. Falls back to {} if every run inherits defaults.
+    let dominantStyle = null;
+    for (const p of paragraphs) {
+      for (const r of p.runs) {
+        if (r.style) { dominantStyle = r.style; break; }
+      }
+      if (dominantStyle) break;
+    }
+    dominantStyle = dominantStyle || {};
+
+    // Emit HTML: each paragraph's runs joined contiguously, paragraphs
+    // joined with <br>. Plain-text preview pulled in parallel for the
+    // layer's name field.
+    const paragraphHtmls = [];
+    let plainText = '';
+    for (const p of paragraphs) {
+      const segments = [];
+      for (const r of p.runs) {
+        segments.push(_runToHtml(r, dominantStyle));
+        plainText += r.text;
+      }
+      paragraphHtmls.push(segments.join(''));
+      plainText += '\n';
+    }
+    plainText = plainText.trim();
+    if (!plainText) return null;
+    const html = paragraphHtmls.join('<br>');
     return {
       html,
       align: alignFromFirstP || 'left',
-      dominantStyle: dominantStyle || {},
-      previewText: allText.slice(0, 60),
+      dominantStyle,
+      previewText: plainText.slice(0, 60),
     };
   }
 
@@ -1090,7 +1166,7 @@ window.ArtstrPptxImporter = (function () {
       for (let j = 0; j < txBody.children.length; j++) {
         const p = txBody.children[j];
         if (p.localName !== 'p') continue;
-        const { text } = _readParagraphRuns(p);
+        const text = _runsToPlainText(_readParagraphRuns(p));
         if (text) paragraphs.push(text);
       }
       const joined = paragraphs.join('\n').trim();
