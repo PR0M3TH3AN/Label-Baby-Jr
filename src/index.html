@@ -17846,6 +17846,15 @@
         const h = (state.customArt?.height || 1080) / 96;
         return Math.max(w, h);
       }
+      if (mode === 'deck') {
+        // The preview renders the deck's first slide. Deck slides
+        // default to 1920x1080 = 20x11.25in like customart / slide.
+        const slides = state.deck?.slides || [];
+        const sl = slides[0]?.slide || {};
+        const w = (Number(sl.width) || 1920) / 96;
+        const h = (Number(sl.height) || 1080) / 96;
+        return Math.max(w, h);
+      }
       // disc-sheet, jewel: letter-sized
       return 11;
     }
@@ -17857,7 +17866,48 @@
       if (mode === 'jewel') return renderJewelSheetToExportCanvas(dpi);
       if (mode === 'customart' || mode === 'slide') return renderCustomArtToExportCanvas(dpi);
       if (mode === 'pixelart') return renderPixelArtToExportCanvas();
+      if (mode === 'deck') return renderDeckToExportCanvas(dpi);
       throw new Error(`Premium preview not supported for mode "${mode}".`);
+    }
+
+    // Render the deck's first slide (themed via composeSlideForDeck)
+    // as the premium preview source. This is the slide buyers see
+    // before unlocking — using slide 1 matches the deck-thumbnail
+    // convention. Decks with zero slides produce an empty canvas
+    // rather than throwing so the publish modal can still proceed.
+    async function renderDeckToExportCanvas(dpi) {
+      const deck = state.deck || {};
+      const slides = Array.isArray(deck.slides) ? deck.slides : [];
+      // Prefer the currently-edited slide if the user is mid-edit;
+      // otherwise slide 1.
+      let entry = null;
+      if (deck.editingIndex != null && slides[deck.editingIndex]) {
+        entry = slides[deck.editingIndex];
+      } else if (slides[0]) {
+        entry = slides[0];
+      }
+      if (!entry) {
+        const canvas = document.createElement('canvas');
+        setupExportCanvas(canvas, 20, 11.25, dpi);
+        return canvas;
+      }
+      const composed = composeSlideForDeck(entry, deck.theme || {});
+      const sl = composed.slide || {};
+      const wIn = (Number(sl.width) || 1920) / 96;
+      const hIn = (Number(sl.height) || 1080) / 96;
+      const canvas = document.createElement('canvas');
+      const ctx = setupExportCanvas(canvas, wIn, hIn, dpi);
+      const bg = sl.background || '#ffffff';
+      if (bg && bg.toLowerCase() !== '#ffffff' && bg.toLowerCase() !== '#fff') {
+        ctx.fillStyle = bg;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      }
+      const layers = (composed.layers || [])
+        .filter(l => (l.target === 'canvas' || !l.target) && !l.hidden && !l._generatedDiscLayer)
+        .slice()
+        .sort((a, b) => (a.z || 0) - (b.z || 0));
+      for (const layer of layers) await drawLayerToCanvas(ctx, layer, dpi);
+      return canvas;
     }
 
     // Render the standalone pixel-art design (state.pixelArt frame 0) into
