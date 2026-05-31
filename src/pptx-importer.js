@@ -1302,6 +1302,207 @@ window.ArtstrPptxImporter = (function () {
     return layers.length ? layers : null;
   }
 
+  // Build a polyline-d string in 0..100 × 0..100 viewBox coords. xs and
+  // ys arrays are paired; the polyline starts at (xs[0], ys[0]) and
+  // line-segments through the rest.
+  function _polylinePathD(xs, ys) {
+    if (!xs.length) return '';
+    if (xs.length === 1) {
+      // Single point — emit a tiny dot via a degenerate Move + Line.
+      const fmt = (n) => Number(n).toFixed(3);
+      return `M ${fmt(xs[0])} ${fmt(ys[0])} L ${fmt(xs[0])} ${fmt(ys[0])}`;
+    }
+    const fmt = (n) => Number(n).toFixed(3);
+    let d = `M ${fmt(xs[0])} ${fmt(ys[0])}`;
+    for (let i = 1; i < xs.length; i++) d += ` L ${fmt(xs[i])} ${fmt(ys[i])}`;
+    return d;
+  }
+
+  // c:lineChart → one path-shape layer per series (polyline) plus
+  // optional marker shapes at each data point. Category labels go
+  // below the plot area, like the bar / column chart.
+  function buildLineChartLayers(lineChartNode, gfBounds, chartLabel, ctx) {
+    const serNodes = [];
+    for (let i = 0; i < lineChartNode.children.length; i++) {
+      if (lineChartNode.children[i].localName === 'ser') serNodes.push(lineChartNode.children[i]);
+    }
+    if (!serNodes.length) return null;
+
+    let categories = [];
+    const series = [];
+    for (let i = 0; i < serNodes.length; i++) {
+      const s = serNodes[i];
+      const cat = _directChild(s, 'cat');
+      if (!categories.length && cat) categories = readCategoryLabels(cat);
+      const values = readSeriesValues(_directChild(s, 'val'));
+      const name = readSeriesName(_directChild(s, 'tx'));
+
+      // Line colour: from c:ser/c:spPr/a:ln/a:solidFill (the line stroke
+      // — note this is on a:ln, NOT directly on c:spPr like bar fills).
+      let color = null;
+      const spPr = _directChild(s, 'spPr');
+      const ln = spPr ? _directChild(spPr, 'ln') : null;
+      if (ln) {
+        const lnFill = _directChild(ln, 'solidFill');
+        if (lnFill) color = convertColor(lnFill, ctx.theme);
+      }
+      if (!color) color = CHART_DEFAULT_PALETTE[i % CHART_DEFAULT_PALETTE.length];
+
+      // Line width: a:ln@w in EMU. PPTX stroke widths are absolute
+      // (independent of slide scale), so convert via EMU_PER_IN
+      // directly. Fallback to ~2 CSS pixels for series with no
+      // explicit width.
+      const EMU_PER_IN = 914400;
+      let lineWidthIn = 2 / PX_PER_IN;
+      if (ln) {
+        const wEmu = Number(ln.getAttribute('w')) || 0;
+        if (wEmu > 0) lineWidthIn = wEmu / EMU_PER_IN;
+      }
+
+      // Marker: c:marker/c:symbol. PowerPoint's default is 'none' for
+      // series without an explicit marker; when present, default size
+      // is 5pt and default symbol is 'circle'.
+      let markerEnabled = false;
+      let markerSizeIn = 5 / 72; // 5pt → inches
+      let markerColor = color;
+      const marker = _directChild(s, 'marker');
+      if (marker) {
+        const symbolNode = _directChild(marker, 'symbol');
+        const symVal = symbolNode?.getAttribute('val') || 'circle';
+        markerEnabled = symVal !== 'none';
+        const sizeNode = _directChild(marker, 'size');
+        if (sizeNode) {
+          const v = Number(sizeNode.getAttribute('val'));
+          if (Number.isFinite(v) && v > 0) markerSizeIn = v / 72;
+        }
+        // Marker fill colour: c:marker/c:spPr/a:solidFill overrides
+        // the series line colour.
+        const mSpPr = _directChild(marker, 'spPr');
+        if (mSpPr) {
+          const mFill = _directChild(mSpPr, 'solidFill');
+          if (mFill) {
+            const mc = convertColor(mFill, ctx.theme);
+            if (mc) markerColor = mc;
+          }
+        }
+      }
+
+      series.push({ name, color, values, lineWidth: lineWidthIn, markerEnabled, markerSizeIn, markerColor });
+    }
+
+    // Plot area (same inset model as bar chart).
+    const pa = {
+      x: gfBounds.x + gfBounds.w * 0.05,
+      y: gfBounds.y + gfBounds.h * 0.05,
+      w: gfBounds.w * 0.90,
+      h: gfBounds.h * 0.80,
+    };
+
+    const N = categories.length || series[0].values.length;
+    if (!N) return null;
+    let maxV = 0;
+    for (const s of series) for (const v of s.values) if (v > maxV) maxV = v;
+    if (maxV <= 0) maxV = 1;
+
+    const layers = [];
+
+    // ---- Polylines ----
+    for (let si = 0; si < series.length; si++) {
+      const s = series[si];
+      const xs = [];
+      const ys = [];
+      // Span the plot area corner-to-corner: first point at x=0, last
+      // at x=100 (in viewBox space). When N === 1, both edges collapse.
+      for (let c = 0; c < N; c++) {
+        const v = Number(s.values[c]) || 0;
+        const xt = N > 1 ? (c / (N - 1)) : 0.5;
+        xs.push(xt * 100);
+        ys.push(100 - (v / maxV) * 100);
+      }
+      const d = _polylinePathD(xs, ys);
+      if (!d) continue;
+      // Stroke width in viewBox units. Layer covers pa, so use the
+      // uniform-scale formula (stroke.width / pa.w) · 100, then let
+      // the renderer's [0.1, 50] clamp catch outliers.
+      const vbStrokeWidth = (s.lineWidth / Math.max(pa.w, pa.h)) * 100;
+
+      layers.push({
+        id: _makePptxLayerId(),
+        type: 'shape',
+        name: `${chartLabel} / Line [${s.name || `Series ${si + 1}`}]`,
+        target: 'canvas',
+        x: pa.x, y: pa.y, w: pa.w, h: pa.h,
+        rotate: 0, opacity: 1, z: ctx.nextZ++,
+        shape: {
+          kind: 'path',
+          d,
+          viewBox: { x: 0, y: 0, w: 100, h: 100 },
+        },
+        fill: { type: 'none' },
+        stroke: {
+          type: 'solid',
+          color: s.color,
+          width: Math.max(0.1, Math.min(50, vbStrokeWidth)),
+          dash: 'solid',
+        },
+      });
+
+      // ---- Markers ----
+      if (s.markerEnabled) {
+        for (let c = 0; c < N; c++) {
+          const v = Number(s.values[c]) || 0;
+          const cxFrac = N > 1 ? (c / (N - 1)) : 0.5;
+          const cxIn = pa.x + cxFrac * pa.w;
+          const cyIn = pa.y + pa.h - (v / maxV) * pa.h;
+          // Centred at the data point, square layer of marker size.
+          layers.push({
+            id: _makePptxLayerId(),
+            type: 'shape',
+            name: `${chartLabel} / Marker [${categories[c] || c + 1}, ${s.name || `Series ${si + 1}`}]`,
+            target: 'canvas',
+            x: cxIn - s.markerSizeIn / 2,
+            y: cyIn - s.markerSizeIn / 2,
+            w: s.markerSizeIn,
+            h: s.markerSizeIn,
+            rotate: 0, opacity: 1, z: ctx.nextZ++,
+            shape: { kind: 'circle' },
+            fill: { type: 'solid', color: s.markerColor },
+            stroke: { type: 'none', color: '#000000', width: 1, dash: 'solid' },
+          });
+        }
+      }
+    }
+
+    // ---- Category labels (below the plot area) ----
+    const labelW = pa.w / N;
+    const labelH = gfBounds.h * 0.10;
+    for (let c = 0; c < N; c++) {
+      const label = categories[c] || '';
+      if (!label) continue;
+      const cxFrac = N > 1 ? (c / (N - 1)) : 0.5;
+      const cxIn = pa.x + cxFrac * pa.w;
+      layers.push({
+        id: _makePptxLayerId(),
+        type: 'text',
+        name: `${chartLabel} / Category label: ${label}`,
+        target: 'canvas',
+        html: _escapeHtml(label),
+        x: cxIn - labelW / 2,
+        y: pa.y + pa.h + (gfBounds.h * 0.02),
+        w: labelW,
+        h: labelH,
+        rotate: 0, opacity: 1, z: ctx.nextZ++,
+        fontFamily: 'inherit',
+        fontSize: 12,
+        color: '#333333',
+        align: 'center',
+        bold: false, italic: false,
+      });
+    }
+
+    return layers.length ? layers : null;
+  }
+
   // Dispatch on the chart type inside c:chartSpace/c:chart/c:plotArea.
   // Returns an array of Artstr layers or null when the chart type
   // isn't natively supported (caller falls back to placeholder).
@@ -1323,7 +1524,9 @@ window.ArtstrPptxImporter = (function () {
       if (ch.localName === 'doughnutChart') {
         return buildPieChartLayers(ch, gfBounds, chartLabel, ctx, { isDoughnut: true });
       }
-      // Phase 3: lineChart
+      if (ch.localName === 'lineChart') {
+        return buildLineChartLayers(ch, gfBounds, chartLabel, ctx);
+      }
       // Phase 5: bar3DChart, line3DChart, pie3DChart, etc.
     }
     return null;
@@ -1931,7 +2134,9 @@ window.ArtstrPptxImporter = (function () {
       readSeriesColor,
       buildBarChartLayers,
       buildPieChartLayers,
+      buildLineChartLayers,
       _sliceArcPath,
+      _polylinePathD,
       convertChart,
       walkSpTree,
       readSlideRels,
